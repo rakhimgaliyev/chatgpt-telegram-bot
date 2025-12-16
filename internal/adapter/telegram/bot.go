@@ -95,6 +95,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 func (b *Bot) sendText(chatID int64, replyTo int, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeMarkdown
 	msg.ReplyToMessageID = replyTo
 	if _, err := b.api.Send(msg); err != nil {
 		log.Printf("failed to send reply: %v", err)
