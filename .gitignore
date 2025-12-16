@@ -1,0 +1,16 @@
+# Go build artifacts
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+main
+
+# Environment
+.env
+
+# OS junk
+.DS_Store
