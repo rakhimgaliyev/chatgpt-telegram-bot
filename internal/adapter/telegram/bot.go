@@ -90,15 +90,31 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	if shouldSendAsFile(resp) {
+		if err := b.sendAsFile(msg.Chat.ID, msg.MessageID, resp); err != nil {
+			log.Printf("failed to send file: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "could not send file, here is the text")
+			b.sendText(msg.Chat.ID, msg.MessageID, resp)
+		}
+		return
+	}
+
 	b.sendText(msg.Chat.ID, msg.MessageID, resp)
 }
 
 func (b *Bot) sendText(chatID int64, replyTo int, text string) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = tgbotapi.ModeMarkdown
-	msg.ReplyToMessageID = replyTo
-	if _, err := b.api.Send(msg); err != nil {
-		log.Printf("failed to send reply: %v", err)
+	const chunkSize = 2048
+
+	chunks := splitText(text, chunkSize)
+	for idx, chunk := range chunks {
+		msg := tgbotapi.NewMessage(chatID, chunk)
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		if idx == 0 {
+			msg.ReplyToMessageID = replyTo
+		}
+		if _, err := b.api.Send(msg); err != nil {
+			log.Printf("failed to send reply: %v", err)
+		}
 	}
 }
 
@@ -115,13 +131,18 @@ func (b *Bot) sendChatAction(chatID int64, asFile bool) {
 func (b *Bot) sendAsFile(chatID int64, replyTo int, content string) error {
 	data := []byte(content)
 	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
-		Name:  "response.txt",
+		Name:  "response.md",
 		Bytes: data,
 	})
 	doc.ReplyToMessageID = replyTo
 
 	_, err := b.api.Send(doc)
 	return err
+}
+
+func shouldSendAsFile(text string) bool {
+	const chunkSize = 2048
+	return len([]rune(text)) > chunkSize
 }
 
 func isAllowedUser(userID int64, cfg config.Config) bool {
@@ -167,4 +188,26 @@ func BuildUserInput(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) (chat.Input, bo
 		Text:   strings.Join(parts, "\n"),
 		Images: images,
 	}, respondAsFile
+}
+
+func splitText(text string, chunkSize int) []string {
+	if chunkSize <= 0 {
+		return []string{text}
+	}
+
+	runes := []rune(text)
+	if len(runes) <= chunkSize {
+		return []string{text}
+	}
+
+	chunks := make([]string, 0, len(runes)/chunkSize+1)
+	for start := 0; start < len(runes); start += chunkSize {
+		end := start + chunkSize
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunks = append(chunks, string(runes[start:end]))
+	}
+
+	return chunks
 }

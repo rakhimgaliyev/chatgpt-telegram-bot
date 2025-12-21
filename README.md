@@ -14,7 +14,7 @@ Go Telegram bot that proxies users to OpenAI chat completions (non-streaming). S
 See `.env.example`:
 - `OPENAI_API_KEY` (required)
 - `TELEGRAM_BOT_TOKEN` (required)
-- `OPENAI_MODEL` (default `gpt-4o-mini`)
+- `OPENAI_MODEL` (default `gpt-5.1`)
 - `ADMIN_USER_IDS`
 - `ALLOWED_TELEGRAM_USER_IDS`
 - `ASSISTANT_PROMPT` (default `You are telegram bot assistant`)
