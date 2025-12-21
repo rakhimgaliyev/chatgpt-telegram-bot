@@ -108,7 +108,6 @@ func (b *Bot) sendText(chatID int64, replyTo int, text string) {
 	chunks := splitText(text, chunkSize)
 	for idx, chunk := range chunks {
 		msg := tgbotapi.NewMessage(chatID, chunk)
-		msg.ParseMode = tgbotapi.ModeMarkdown
 		if idx == 0 {
 			msg.ReplyToMessageID = replyTo
 		}
