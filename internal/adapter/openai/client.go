@@ -3,11 +3,13 @@ package openai
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 
 	openaiapi "github.com/sashabaranov/go-openai"
 
 	"chatgpt-telegram-bot/internal/usecase/chat"
+	"chatgpt-telegram-bot/internal/usecase/tts"
 )
 
 type Client struct {
@@ -38,6 +40,38 @@ func (c *Client) Complete(ctx context.Context, req chat.CompletionRequest) (stri
 	}
 
 	return resp.Choices[0].Message.Content, nil
+}
+
+func (c *Client) Speech(ctx context.Context, req tts.Request) (tts.Response, error) {
+	format := strings.TrimSpace(req.Format)
+	if format == "" {
+		format = "mp3"
+	}
+
+	apiReq := openaiapi.CreateSpeechRequest{
+		Model: openaiapi.SpeechModel(req.Model),
+		Input: req.Text,
+		Voice: openaiapi.SpeechVoice(req.Voice),
+	}
+	if req.Format != "" {
+		apiReq.ResponseFormat = openaiapi.SpeechResponseFormat(req.Format)
+	}
+
+	raw, err := c.api.CreateSpeech(ctx, apiReq)
+	if err != nil {
+		return tts.Response{}, err
+	}
+	defer raw.Close()
+
+	data, err := io.ReadAll(raw)
+	if err != nil {
+		return tts.Response{}, err
+	}
+
+	return tts.Response{
+		Data:   data,
+		Format: format,
+	}, nil
 }
 
 func toAPIMessages(msgs []chat.Message) []openaiapi.ChatCompletionMessage {

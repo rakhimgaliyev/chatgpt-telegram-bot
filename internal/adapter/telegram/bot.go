@@ -11,16 +11,18 @@ import (
 
 	"chatgpt-telegram-bot/internal/config"
 	"chatgpt-telegram-bot/internal/usecase/chat"
+	"chatgpt-telegram-bot/internal/usecase/tts"
 )
 
 type Bot struct {
 	api  *tgbotapi.BotAPI
 	cfg  config.Config
 	chat *chat.Service
+	tts  *tts.Service
 	now  func() time.Time
 }
 
-func NewBot(cfg config.Config, chatSvc *chat.Service) (*Bot, error) {
+func NewBot(cfg config.Config, chatSvc *chat.Service, ttsSvc *tts.Service) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
 	if err != nil {
 		return nil, err
@@ -30,6 +32,7 @@ func NewBot(cfg config.Config, chatSvc *chat.Service) (*Bot, error) {
 		api:  api,
 		cfg:  cfg,
 		chat: chatSvc,
+		tts:  ttsSvc,
 		now:  time.Now,
 	}, nil
 }
@@ -63,6 +66,31 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		deny.ReplyToMessageID = msg.MessageID
 		if _, err := b.api.Send(deny); err != nil {
 			log.Printf("failed to send deny message: %v", err)
+		}
+		return
+	}
+
+	if ok, text := extractCommandText(msg.Text, "tts"); ok {
+		if strings.TrimSpace(text) == "" {
+			b.sendText(msg.Chat.ID, msg.MessageID, "usage: /tts <text>")
+			return
+		}
+
+		b.sendChatAction(msg.Chat.ID, true)
+		audio, err := b.tts.Synthesize(ctx, text)
+		if err != nil {
+			if errors.Is(err, tts.ErrEmptyText) {
+				b.sendText(msg.Chat.ID, msg.MessageID, "i need some text to synthesize")
+				return
+			}
+			log.Printf("tts request failed: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "failed to generate audio, try again later")
+			return
+		}
+
+		if err := b.sendAudio(msg.Chat.ID, msg.MessageID, audio); err != nil {
+			log.Printf("failed to send audio: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "could not send audio")
 		}
 		return
 	}
@@ -139,9 +167,44 @@ func (b *Bot) sendAsFile(chatID int64, replyTo int, content string) error {
 	return err
 }
 
+func (b *Bot) sendAudio(chatID int64, replyTo int, resp tts.Response) error {
+	ext := strings.TrimSpace(resp.Format)
+	if ext == "" {
+		ext = "mp3"
+	}
+	filename := "speech." + ext
+	audio := tgbotapi.NewAudio(chatID, tgbotapi.FileBytes{
+		Name:  filename,
+		Bytes: resp.Data,
+	})
+	audio.ReplyToMessageID = replyTo
+	_, err := b.api.Send(audio)
+	return err
+}
+
 func shouldSendAsFile(text string) bool {
 	const chunkSize = 2048
 	return len([]rune(text)) > chunkSize
+}
+
+func extractCommandText(text string, command string) (bool, string) {
+	if strings.TrimSpace(text) == "" {
+		return false, ""
+	}
+	parts := strings.Fields(text)
+	if len(parts) == 0 {
+		return false, ""
+	}
+	first := strings.ToLower(parts[0])
+	if !strings.HasPrefix(first, "/") {
+		return false, ""
+	}
+	first = strings.TrimPrefix(first, "/")
+	first = strings.SplitN(first, "@", 2)[0]
+	if first != strings.ToLower(command) {
+		return false, ""
+	}
+	return true, strings.TrimSpace(text[len(parts[0]):])
 }
 
 func isAllowedUser(userID int64, chatID int64, cfg config.Config) bool {

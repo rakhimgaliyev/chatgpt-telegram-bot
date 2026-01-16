@@ -11,6 +11,7 @@ import (
 	"chatgpt-telegram-bot/internal/adapter/telegram"
 	"chatgpt-telegram-bot/internal/config"
 	"chatgpt-telegram-bot/internal/usecase/chat"
+	"chatgpt-telegram-bot/internal/usecase/tts"
 )
 
 func main() {
@@ -22,8 +23,9 @@ func main() {
 	openAIClient := openai.NewClient(cfg.OpenAIKey)
 	store := memory.NewStore()
 	chatSvc := chat.NewService(store, openAIClient, cfg)
+	ttsSvc := tts.NewService(openAIClient, cfg)
 
-	bot, err := telegram.NewBot(cfg, chatSvc)
+	bot, err := telegram.NewBot(cfg, chatSvc, ttsSvc)
 	if err != nil {
 		log.Fatalf("failed to init telegram bot: %v", err)
 	}

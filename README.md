@@ -8,6 +8,7 @@ Go Telegram bot that proxies users to OpenAI chat completions (non-streaming). S
 - Context: keeps up to `CONTEXT_MESSAGE_LIMIT` fresh messages within `CONTEXT_TTL_MINUTES`.
 - Access control: admins always allowed; optional allow-list for users or chats.
 - `/file <prompt>` returns the answer as `response.txt`.
+- `/tts <text>` returns synthesized speech as audio.
 - Handles attachments (photos, docs, audio/video/voice/sticker/animation) by describing them in the prompt; images are passed to OpenAI.
 
 ## Config (.env)
@@ -15,6 +16,9 @@ See `.env.example`:
 - `OPENAI_API_KEY` (required)
 - `TELEGRAM_BOT_TOKEN` (required)
 - `OPENAI_MODEL` (default `gpt-5.1`)
+- `OPENAI_TTS_MODEL` (default `gpt-4o-mini-tts`)
+- `OPENAI_TTS_VOICE` (default `alloy`)
+- `OPENAI_TTS_FORMAT` (default `mp3`)
 - `ADMIN_USER_IDS`
 - `ALLOWED_TELEGRAM_USER_IDS`
 - `ALLOWED_TELEGRAM_CHAT_IDS`

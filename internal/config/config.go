@@ -17,6 +17,9 @@ type Config struct {
 	AdminUserIDs        []int64
 	AllowedUserIDs      []int64
 	AllowedChatIDs      []int64
+	TTSModel            string
+	TTSVoice            string
+	TTSFormat           string
 	AssistantPrompt     string
 	MaxCompletionTokens int
 	ContextLimit        int
@@ -30,6 +33,9 @@ func Load(path string) (Config, error) {
 
 	cfg := Config{
 		Model:               getenvDefault("OPENAI_MODEL", "gpt-5.1"),
+		TTSModel:            getenvDefault("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
+		TTSVoice:            getenvDefault("OPENAI_TTS_VOICE", "alloy"),
+		TTSFormat:           getenvDefault("OPENAI_TTS_FORMAT", "mp3"),
 		AssistantPrompt:     getenvDefault("ASSISTANT_PROMPT", "You are telegram bot assistant"),
 		MaxCompletionTokens: getenvIntDefault("MAX_TOKENS", 4096),
 		ContextLimit:        getenvIntDefault("CONTEXT_MESSAGE_LIMIT", 20),
