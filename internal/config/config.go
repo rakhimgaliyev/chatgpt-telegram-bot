@@ -16,6 +16,7 @@ type Config struct {
 	Model               string
 	AdminUserIDs        []int64
 	AllowedUserIDs      []int64
+	AllowedChatIDs      []int64
 	AssistantPrompt     string
 	MaxCompletionTokens int
 	ContextLimit        int
@@ -43,6 +44,7 @@ func Load(path string) (Config, error) {
 
 	cfg.AdminUserIDs = parseIDs(os.Getenv("ADMIN_USER_IDS"))
 	cfg.AllowedUserIDs = parseIDs(os.Getenv("ALLOWED_TELEGRAM_USER_IDS"))
+	cfg.AllowedChatIDs = parseIDs(os.Getenv("ALLOWED_TELEGRAM_CHAT_IDS"))
 
 	return cfg, nil
 }

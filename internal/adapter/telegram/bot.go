@@ -58,7 +58,7 @@ func (b *Bot) Run(ctx context.Context) error {
 }
 
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
-	if !isAllowedUser(msg.From.ID, b.cfg) {
+	if !isAllowedUser(msg.From.ID, msg.Chat.ID, b.cfg) {
 		deny := tgbotapi.NewMessage(msg.Chat.ID, "access denied")
 		deny.ReplyToMessageID = msg.MessageID
 		if _, err := b.api.Send(deny); err != nil {
@@ -144,19 +144,25 @@ func shouldSendAsFile(text string) bool {
 	return len([]rune(text)) > chunkSize
 }
 
-func isAllowedUser(userID int64, cfg config.Config) bool {
+func isAllowedUser(userID int64, chatID int64, cfg config.Config) bool {
 	for _, id := range cfg.AdminUserIDs {
 		if id == userID {
 			return true
 		}
 	}
 
-	if len(cfg.AllowedUserIDs) == 0 {
+	if len(cfg.AllowedUserIDs) == 0 && len(cfg.AllowedChatIDs) == 0 {
 		return true
 	}
 
 	for _, id := range cfg.AllowedUserIDs {
 		if id == userID {
+			return true
+		}
+	}
+
+	for _, id := range cfg.AllowedChatIDs {
+		if id == chatID {
 			return true
 		}
 	}

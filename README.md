@@ -6,7 +6,7 @@ Go Telegram bot that proxies users to OpenAI chat completions (non-streaming). S
 - Replies to messages via OpenAI ChatCompletion (no streaming).
 - Multimodal: photos/image documents are inlined as data URLs for the model.
 - Context: keeps up to `CONTEXT_MESSAGE_LIMIT` fresh messages within `CONTEXT_TTL_MINUTES`.
-- Access control: admins always allowed; optional allow-list for others.
+- Access control: admins always allowed; optional allow-list for users or chats.
 - `/file <prompt>` returns the answer as `response.txt`.
 - Handles attachments (photos, docs, audio/video/voice/sticker/animation) by describing them in the prompt; images are passed to OpenAI.
 
@@ -17,6 +17,7 @@ See `.env.example`:
 - `OPENAI_MODEL` (default `gpt-5.1`)
 - `ADMIN_USER_IDS`
 - `ALLOWED_TELEGRAM_USER_IDS`
+- `ALLOWED_TELEGRAM_CHAT_IDS`
 - `ASSISTANT_PROMPT` (default `You are telegram bot assistant`)
 - `MAX_TOKENS` (max completion tokens, default `4096`)
 - `CONTEXT_MESSAGE_LIMIT` (default `20`)
