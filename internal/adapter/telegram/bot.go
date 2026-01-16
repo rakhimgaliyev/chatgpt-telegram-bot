@@ -11,6 +11,7 @@ import (
 
 	"chatgpt-telegram-bot/internal/config"
 	"chatgpt-telegram-bot/internal/usecase/chat"
+	imagegen "chatgpt-telegram-bot/internal/usecase/image"
 	"chatgpt-telegram-bot/internal/usecase/tts"
 )
 
@@ -19,10 +20,11 @@ type Bot struct {
 	cfg  config.Config
 	chat *chat.Service
 	tts  *tts.Service
+	img  *imagegen.Service
 	now  func() time.Time
 }
 
-func NewBot(cfg config.Config, chatSvc *chat.Service, ttsSvc *tts.Service) (*Bot, error) {
+func NewBot(cfg config.Config, chatSvc *chat.Service, ttsSvc *tts.Service, imgSvc *imagegen.Service) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
 	if err != nil {
 		return nil, err
@@ -33,6 +35,7 @@ func NewBot(cfg config.Config, chatSvc *chat.Service, ttsSvc *tts.Service) (*Bot
 		cfg:  cfg,
 		chat: chatSvc,
 		tts:  ttsSvc,
+		img:  imgSvc,
 		now:  time.Now,
 	}, nil
 }
@@ -91,6 +94,31 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		if err := b.sendVoice(msg.Chat.ID, msg.MessageID, audio); err != nil {
 			log.Printf("failed to send voice: %v", err)
 			b.sendText(msg.Chat.ID, msg.MessageID, "could not send voice message")
+		}
+		return
+	}
+
+	if ok, text := extractCommandText(msg.Text, "img"); ok {
+		if strings.TrimSpace(text) == "" {
+			b.sendText(msg.Chat.ID, msg.MessageID, "usage: /img <prompt>")
+			return
+		}
+
+		b.sendPhotoAction(msg.Chat.ID)
+		imageResp, err := b.img.Generate(ctx, text)
+		if err != nil {
+			if errors.Is(err, imagegen.ErrEmptyPrompt) {
+				b.sendText(msg.Chat.ID, msg.MessageID, "i need a prompt to generate an image")
+				return
+			}
+			log.Printf("image generation failed: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "failed to generate image, try again later")
+			return
+		}
+
+		if err := b.sendImage(msg.Chat.ID, msg.MessageID, imageResp); err != nil {
+			log.Printf("failed to send image: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "could not send image")
 		}
 		return
 	}
@@ -161,6 +189,12 @@ func (b *Bot) sendVoiceAction(chatID int64) {
 	}
 }
 
+func (b *Bot) sendPhotoAction(chatID int64) {
+	if _, err := b.api.Request(tgbotapi.NewChatAction(chatID, tgbotapi.ChatUploadPhoto)); err != nil {
+		log.Printf("failed to send chat action: %v", err)
+	}
+}
+
 func (b *Bot) sendAsFile(chatID int64, replyTo int, content string) error {
 	data := []byte(content)
 	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
@@ -188,6 +222,24 @@ func (b *Bot) sendVoice(chatID int64, replyTo int, resp tts.Response) error {
 	})
 	voice.ReplyToMessageID = replyTo
 	_, err := b.api.Send(voice)
+	return err
+}
+
+func (b *Bot) sendImage(chatID int64, replyTo int, resp imagegen.Response) error {
+	ext := strings.TrimSpace(resp.Format)
+	if ext == "" {
+		ext = "png"
+	}
+	if ext == "jpeg" {
+		ext = "jpg"
+	}
+	filename := "image." + ext
+	photo := tgbotapi.NewPhoto(chatID, tgbotapi.FileBytes{
+		Name:  filename,
+		Bytes: resp.Data,
+	})
+	photo.ReplyToMessageID = replyTo
+	_, err := b.api.Send(photo)
 	return err
 }
 

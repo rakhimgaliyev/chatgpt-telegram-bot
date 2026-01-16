@@ -20,6 +20,11 @@ type Config struct {
 	TTSModel            string
 	TTSVoice            string
 	TTSFormat           string
+	ImageModel          string
+	ImageSize           string
+	ImageQuality        string
+	ImageFormat         string
+	ImageBackground     string
 	AssistantPrompt     string
 	MaxCompletionTokens int
 	ContextLimit        int
@@ -36,6 +41,11 @@ func Load(path string) (Config, error) {
 		TTSModel:            getenvDefault("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
 		TTSVoice:            getenvDefault("OPENAI_TTS_VOICE", "alloy"),
 		TTSFormat:           getenvDefault("OPENAI_TTS_FORMAT", "opus"),
+		ImageModel:          getenvDefault("OPENAI_IMAGE_MODEL", ""),
+		ImageSize:           getenvDefault("OPENAI_IMAGE_SIZE", "auto"),
+		ImageQuality:        getenvDefault("OPENAI_IMAGE_QUALITY", "auto"),
+		ImageFormat:         getenvDefault("OPENAI_IMAGE_FORMAT", "png"),
+		ImageBackground:     getenvDefault("OPENAI_IMAGE_BACKGROUND", ""),
 		AssistantPrompt:     getenvDefault("ASSISTANT_PROMPT", "You are telegram bot assistant"),
 		MaxCompletionTokens: getenvIntDefault("MAX_TOKENS", 4096),
 		ContextLimit:        getenvIntDefault("CONTEXT_MESSAGE_LIMIT", 20),
@@ -51,6 +61,9 @@ func Load(path string) (Config, error) {
 	cfg.AdminUserIDs = parseIDs(os.Getenv("ADMIN_USER_IDS"))
 	cfg.AllowedUserIDs = parseIDs(os.Getenv("ALLOWED_TELEGRAM_USER_IDS"))
 	cfg.AllowedChatIDs = parseIDs(os.Getenv("ALLOWED_TELEGRAM_CHAT_IDS"))
+	if cfg.ImageModel == "" {
+		cfg.ImageModel = cfg.Model
+	}
 
 	return cfg, nil
 }

@@ -9,6 +9,7 @@ Go Telegram bot that proxies users to OpenAI chat completions (non-streaming). S
 - Access control: admins always allowed; optional allow-list for users or chats.
 - `/file <prompt>` returns the answer as `response.txt`.
 - `/tts <text>` returns synthesized speech as a voice message.
+- `/img <prompt>` generates an image and returns it as a photo.
 - Handles attachments (photos, docs, audio/video/voice/sticker/animation) by describing them in the prompt; images are passed to OpenAI.
 
 ## Config (.env)
@@ -19,6 +20,11 @@ See `.env.example`:
 - `OPENAI_TTS_MODEL` (default `gpt-4o-mini-tts`)
 - `OPENAI_TTS_VOICE` (default `alloy`)
 - `OPENAI_TTS_FORMAT` (default `opus`, recommended for voice messages)
+- `OPENAI_IMAGE_MODEL` (default `OPENAI_MODEL`)
+- `OPENAI_IMAGE_SIZE` (default `auto`)
+- `OPENAI_IMAGE_QUALITY` (default `auto`)
+- `OPENAI_IMAGE_FORMAT` (default `png`)
+- `OPENAI_IMAGE_BACKGROUND` (optional, default empty)
 - `ADMIN_USER_IDS`
 - `ALLOWED_TELEGRAM_USER_IDS`
 - `ALLOWED_TELEGRAM_CHAT_IDS`

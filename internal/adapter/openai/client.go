@@ -13,12 +13,14 @@ import (
 )
 
 type Client struct {
-	api *openaiapi.Client
+	api   *openaiapi.Client
+	token string
 }
 
 func NewClient(token string) *Client {
 	return &Client{
-		api: openaiapi.NewClient(token),
+		api:   openaiapi.NewClient(token),
+		token: token,
 	}
 }
 
