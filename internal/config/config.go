@@ -35,7 +35,7 @@ func Load(path string) (Config, error) {
 		Model:               getenvDefault("OPENAI_MODEL", "gpt-5.1"),
 		TTSModel:            getenvDefault("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
 		TTSVoice:            getenvDefault("OPENAI_TTS_VOICE", "alloy"),
-		TTSFormat:           getenvDefault("OPENAI_TTS_FORMAT", "mp3"),
+		TTSFormat:           getenvDefault("OPENAI_TTS_FORMAT", "opus"),
 		AssistantPrompt:     getenvDefault("ASSISTANT_PROMPT", "You are telegram bot assistant"),
 		MaxCompletionTokens: getenvIntDefault("MAX_TOKENS", 4096),
 		ContextLimit:        getenvIntDefault("CONTEXT_MESSAGE_LIMIT", 20),

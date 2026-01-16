@@ -76,7 +76,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 			return
 		}
 
-		b.sendChatAction(msg.Chat.ID, true)
+		b.sendVoiceAction(msg.Chat.ID)
 		audio, err := b.tts.Synthesize(ctx, text)
 		if err != nil {
 			if errors.Is(err, tts.ErrEmptyText) {
@@ -88,9 +88,9 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 			return
 		}
 
-		if err := b.sendAudio(msg.Chat.ID, msg.MessageID, audio); err != nil {
-			log.Printf("failed to send audio: %v", err)
-			b.sendText(msg.Chat.ID, msg.MessageID, "could not send audio")
+		if err := b.sendVoice(msg.Chat.ID, msg.MessageID, audio); err != nil {
+			log.Printf("failed to send voice: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "could not send voice message")
 		}
 		return
 	}
@@ -155,6 +155,12 @@ func (b *Bot) sendChatAction(chatID int64, asFile bool) {
 	}
 }
 
+func (b *Bot) sendVoiceAction(chatID int64) {
+	if _, err := b.api.Request(tgbotapi.NewChatAction(chatID, tgbotapi.ChatUploadVoice)); err != nil {
+		log.Printf("failed to send chat action: %v", err)
+	}
+}
+
 func (b *Bot) sendAsFile(chatID int64, replyTo int, content string) error {
 	data := []byte(content)
 	doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
@@ -167,18 +173,21 @@ func (b *Bot) sendAsFile(chatID int64, replyTo int, content string) error {
 	return err
 }
 
-func (b *Bot) sendAudio(chatID int64, replyTo int, resp tts.Response) error {
+func (b *Bot) sendVoice(chatID int64, replyTo int, resp tts.Response) error {
 	ext := strings.TrimSpace(resp.Format)
 	if ext == "" {
-		ext = "mp3"
+		ext = "opus"
 	}
-	filename := "speech." + ext
-	audio := tgbotapi.NewAudio(chatID, tgbotapi.FileBytes{
+	if ext == "opus" {
+		ext = "ogg"
+	}
+	filename := "voice." + ext
+	voice := tgbotapi.NewVoice(chatID, tgbotapi.FileBytes{
 		Name:  filename,
 		Bytes: resp.Data,
 	})
-	audio.ReplyToMessageID = replyTo
-	_, err := b.api.Send(audio)
+	voice.ReplyToMessageID = replyTo
+	_, err := b.api.Send(voice)
 	return err
 }
 
