@@ -231,7 +231,7 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	b.sendText(msg.Chat.ID, msg.MessageID, resp)
+	b.sendFormatted(msg.Chat.ID, msg.MessageID, resp)
 }
 
 // collectInputImages loads the images to edit: the one attached to the
@@ -287,6 +287,18 @@ func (b *Bot) sendText(chatID int64, replyTo int, text string) {
 		if _, err := b.api.Send(msg); err != nil {
 			log.Printf("failed to send reply: %v", err)
 		}
+	}
+}
+
+// sendFormatted renders model Markdown as Telegram HTML and falls back to
+// plain text when Telegram rejects the markup.
+func (b *Bot) sendFormatted(chatID int64, replyTo int, text string) {
+	msg := tgbotapi.NewMessage(chatID, markdownToHTML(text))
+	msg.ParseMode = tgbotapi.ModeHTML
+	msg.ReplyToMessageID = replyTo
+	if _, err := b.api.Send(msg); err != nil {
+		log.Printf("failed to send formatted reply, falling back to plain text: %v", err)
+		b.sendText(chatID, replyTo, text)
 	}
 }
 
@@ -360,9 +372,12 @@ func (b *Bot) sendImage(chatID int64, replyTo int, resp imagegen.Response) error
 	return err
 }
 
+// maxInlineReply keeps a formatted reply under Telegram's 4096 character
+// limit with room for UTF-16 surrogate pairs; longer answers go as a file.
+const maxInlineReply = 3500
+
 func shouldSendAsFile(text string) bool {
-	const chunkSize = 2048
-	return len([]rune(text)) > chunkSize
+	return len([]rune(text)) > maxInlineReply
 }
 
 func extractCommandText(text string, command string) (bool, string) {
