@@ -1,7 +1,6 @@
 package config
 
 import (
-	"bufio"
 	"errors"
 	"log"
 	"os"
@@ -37,11 +36,11 @@ func Load(path string) (Config, error) {
 	}
 
 	cfg := Config{
-		Model:               getenvDefault("OPENAI_MODEL", "gpt-5.1"),
+		Model:               getenvDefault("OPENAI_MODEL", "gpt-6-luna"),
 		TTSModel:            getenvDefault("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
 		TTSVoice:            getenvDefault("OPENAI_TTS_VOICE", "alloy"),
 		TTSFormat:           getenvDefault("OPENAI_TTS_FORMAT", "opus"),
-		ImageModel:          getenvDefault("OPENAI_IMAGE_MODEL", ""),
+		ImageModel:          getenvDefault("OPENAI_IMAGE_MODEL", "gpt-image-2.5-flare"),
 		ImageSize:           getenvDefault("OPENAI_IMAGE_SIZE", "auto"),
 		ImageQuality:        getenvDefault("OPENAI_IMAGE_QUALITY", "auto"),
 		ImageFormat:         getenvDefault("OPENAI_IMAGE_FORMAT", "png"),
@@ -61,9 +60,6 @@ func Load(path string) (Config, error) {
 	cfg.AdminUserIDs = parseIDs(os.Getenv("ADMIN_USER_IDS"))
 	cfg.AllowedUserIDs = parseIDs(os.Getenv("ALLOWED_TELEGRAM_USER_IDS"))
 	cfg.AllowedChatIDs = parseIDs(os.Getenv("ALLOWED_TELEGRAM_CHAT_IDS"))
-	if cfg.ImageModel == "" {
-		cfg.ImageModel = cfg.Model
-	}
 
 	return cfg, nil
 }
@@ -113,15 +109,27 @@ func getenvIntDefault(key string, def int) int {
 }
 
 func loadDotEnv(path string) error {
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	for key, val := range parseDotEnv(string(data)) {
+		if _, exists := os.LookupEnv(key); !exists {
+			_ = os.Setenv(key, val)
+		}
+	}
+	return nil
+}
+
+// parseDotEnv parses KEY=VALUE lines. A value wrapped in single or double
+// quotes may span multiple lines, e.g. a long ASSISTANT_PROMPT.
+func parseDotEnv(content string) map[string]string {
+	res := make(map[string]string)
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -129,11 +137,46 @@ func loadDotEnv(path string) error {
 		if !ok {
 			continue
 		}
-		if _, exists := os.LookupEnv(key); !exists {
-			_ = os.Setenv(key, val)
+
+		if quote, open := openQuote(val); open {
+			buf := []string{val[1:]}
+			closed := false
+			for i+1 < len(lines) {
+				i++
+				next := strings.TrimRight(lines[i], " \t")
+				if strings.HasSuffix(next, quote) {
+					buf = append(buf, strings.TrimSuffix(next, quote))
+					closed = true
+					break
+				}
+				buf = append(buf, next)
+			}
+			if !closed {
+				log.Printf("unterminated quoted value for %s in .env", key)
+			}
+			res[key] = strings.Join(buf, "\n")
+			continue
 		}
+
+		res[key] = strings.Trim(val, `"'`)
 	}
-	return scanner.Err()
+	return res
+}
+
+// openQuote reports whether val starts with a quote that is not closed on
+// the same line.
+func openQuote(val string) (string, bool) {
+	if val == "" {
+		return "", false
+	}
+	q := val[:1]
+	if q != `"` && q != "'" {
+		return "", false
+	}
+	if len(val) >= 2 && strings.HasSuffix(val, q) {
+		return "", false
+	}
+	return q, true
 }
 
 func parseEnvLine(line string) (string, string, bool) {
@@ -146,7 +189,6 @@ func parseEnvLine(line string) (string, string, bool) {
 	}
 	key := strings.TrimSpace(parts[0])
 	val := strings.TrimSpace(parts[1])
-	val = strings.Trim(val, `"'`)
 	if key == "" {
 		return "", "", false
 	}

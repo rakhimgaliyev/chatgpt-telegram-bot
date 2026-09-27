@@ -41,9 +41,17 @@ func (s *Store) FreshMessages(chatID int64, limit int, ttl time.Duration) []doma
 		}
 	}
 
-	if len(fresh) > limit {
+	if limit >= 0 && len(fresh) > limit {
 		fresh = fresh[len(fresh)-limit:]
 	}
+
+	// expired and over-limit messages are never read again, drop them so
+	// memory does not grow for the lifetime of the process
+	if len(fresh) == 0 {
+		delete(s.conversations, chatID)
+		return nil
+	}
+	s.conversations[chatID] = fresh
 
 	return append([]domain.Message(nil), fresh...)
 }

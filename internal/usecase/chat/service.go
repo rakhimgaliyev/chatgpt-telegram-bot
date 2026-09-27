@@ -10,7 +10,10 @@ import (
 	"chatgpt-telegram-bot/internal/domain"
 )
 
-var ErrEmptyMessage = errors.New("empty message")
+var (
+	ErrEmptyMessage  = errors.New("empty message")
+	ErrEmptyResponse = errors.New("empty model response")
+)
 
 type Client interface {
 	Complete(ctx context.Context, req CompletionRequest) (string, error)
@@ -65,7 +68,6 @@ func (s *Service) HandleMessage(ctx context.Context, chatID int64, input Input) 
 	}
 
 	history := s.store.FreshMessages(chatID, s.cfg.ContextLimit, s.cfg.ContextTTL)
-	s.store.Add(chatID, userMessage)
 
 	messages := make([]Message, 0, len(history)+2)
 	messages = append(messages, Message{
@@ -96,6 +98,9 @@ func (s *Service) HandleMessage(ctx context.Context, chatID int64, input Input) 
 		return "", err
 	}
 
+	// store the turn only after success so a failed request does not leave
+	// a dangling user message in the history
+	s.store.Add(chatID, userMessage)
 	s.store.Add(chatID, domain.Message{
 		Role:      domain.RoleAssistant,
 		Content:   resp,

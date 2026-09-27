@@ -2,18 +2,27 @@ package telegram
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"chatgpt-telegram-bot/internal/usecase/chat"
 )
+
+// maxImageBytes guards against pulling huge image documents into memory
+// and sending them to OpenAI; Telegram bots can download up to 20 MB.
+const maxImageBytes = 20 << 20
+
+var fileClient = &http.Client{Timeout: 60 * time.Second}
 
 func DescribeAttachments(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) ([]string, []chat.Image) {
 	parts := make([]string, 0, 8)
@@ -144,17 +153,29 @@ func fetchDataURL(bot *tgbotapi.BotAPI, fileID, fallbackMime string) (string, er
 	if err != nil {
 		return "", err
 	}
-	url := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", bot.Token, file.FilePath)
+	fileURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", bot.Token, file.FilePath)
 
-	resp, err := http.Get(url) // #nosec G107
+	resp, err := fileClient.Get(fileURL) // #nosec G107
 	if err != nil {
-		return "", err
+		// url.Error embeds the full URL, which contains the bot token
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) {
+			err = urlErr.Err
+		}
+		return "", fmt.Errorf("download %s: %w", file.FilePath, err)
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download %s: status %d", file.FilePath, resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
 	if err != nil {
 		return "", err
+	}
+	if len(data) > maxImageBytes {
+		return "", fmt.Errorf("download %s: file larger than %d bytes", file.FilePath, maxImageBytes)
 	}
 
 	mimeType := resp.Header.Get("Content-Type")

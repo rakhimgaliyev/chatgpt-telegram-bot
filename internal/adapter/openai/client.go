@@ -3,8 +3,11 @@ package openai
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
 	"strings"
+	"time"
 
 	openaiapi "github.com/sashabaranov/go-openai"
 
@@ -12,15 +15,19 @@ import (
 	"chatgpt-telegram-bot/internal/usecase/tts"
 )
 
+// requestTimeout caps a single OpenAI call; reasoning models and image
+// generation can take a while, but a hung request must not live forever.
+const requestTimeout = 5 * time.Minute
+
 type Client struct {
-	api   *openaiapi.Client
-	token string
+	api *openaiapi.Client
 }
 
 func NewClient(token string) *Client {
+	cfg := openaiapi.DefaultConfig(token)
+	cfg.HTTPClient = &http.Client{Timeout: requestTimeout}
 	return &Client{
-		api:   openaiapi.NewClient(token),
-		token: token,
+		api: openaiapi.NewClientWithConfig(cfg),
 	}
 }
 
@@ -41,7 +48,18 @@ func (c *Client) Complete(ctx context.Context, req chat.CompletionRequest) (stri
 		return "", errors.New("openai returned empty response")
 	}
 
-	return resp.Choices[0].Message.Content, nil
+	choice := resp.Choices[0]
+	content := choice.Message.Content
+	if strings.TrimSpace(content) == "" {
+		// reasoning models can spend the whole token budget on thinking
+		// and return no visible text
+		if choice.FinishReason == openaiapi.FinishReasonLength {
+			return "", fmt.Errorf("%w: token limit reached before any output", chat.ErrEmptyResponse)
+		}
+		return "", fmt.Errorf("%w: finish reason %q", chat.ErrEmptyResponse, choice.FinishReason)
+	}
+
+	return content, nil
 }
 
 func (c *Client) Speech(ctx context.Context, req tts.Request) (tts.Response, error) {

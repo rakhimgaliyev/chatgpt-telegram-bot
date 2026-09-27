@@ -58,6 +58,11 @@ func (b *Bot) Run(ctx context.Context) error {
 			if msg.From == nil {
 				continue
 			}
+			// service messages (video chat started, member joined, pinned, etc.)
+			// carry no user content and must not trigger a reply
+			if !hasUserContent(msg) {
+				continue
+			}
 			go b.handleMessage(ctx, msg)
 		}
 	}
@@ -65,6 +70,11 @@ func (b *Bot) Run(ctx context.Context) error {
 
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	if !isAllowedUser(msg.From.ID, msg.Chat.ID, b.cfg) {
+		// in groups stay silent, otherwise the bot spams every message
+		// of a chat it was added to without permission
+		if !msg.Chat.IsPrivate() {
+			return
+		}
 		deny := tgbotapi.NewMessage(msg.Chat.ID, "access denied")
 		deny.ReplyToMessageID = msg.MessageID
 		if _, err := b.api.Send(deny); err != nil {
@@ -133,6 +143,10 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 			return
 		}
 		log.Printf("openai request failed: %v", err)
+		if errors.Is(err, chat.ErrEmptyResponse) {
+			b.sendText(msg.Chat.ID, msg.MessageID, "the model returned an empty answer, try rephrasing or raise MAX_TOKENS")
+			return
+		}
 		b.sendText(msg.Chat.ID, msg.MessageID, "failed to reach openai, try again later")
 		return
 	}
@@ -249,7 +263,8 @@ func shouldSendAsFile(text string) bool {
 }
 
 func extractCommandText(text string, command string) (bool, string) {
-	if strings.TrimSpace(text) == "" {
+	text = strings.TrimSpace(text)
+	if text == "" {
 		return false, ""
 	}
 	parts := strings.Fields(text)
@@ -266,6 +281,19 @@ func extractCommandText(text string, command string) (bool, string) {
 		return false, ""
 	}
 	return true, strings.TrimSpace(text[len(parts[0]):])
+}
+
+func hasUserContent(msg *tgbotapi.Message) bool {
+	return strings.TrimSpace(msg.Text) != "" ||
+		strings.TrimSpace(msg.Caption) != "" ||
+		len(msg.Photo) > 0 ||
+		msg.Document != nil ||
+		msg.Audio != nil ||
+		msg.Voice != nil ||
+		msg.Video != nil ||
+		msg.VideoNote != nil ||
+		msg.Sticker != nil ||
+		msg.Animation != nil
 }
 
 func isAllowedUser(userID int64, chatID int64, cfg config.Config) bool {
@@ -295,11 +323,10 @@ func isAllowedUser(userID int64, chatID int64, cfg config.Config) bool {
 }
 
 func BuildUserInput(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) (chat.Input, bool) {
-	respondAsFile := false
 	text := msg.Text
-	if strings.HasPrefix(strings.ToLower(text), "/file") {
-		respondAsFile = true
-		text = strings.TrimSpace(text[len("/file"):])
+	respondAsFile, fileText := extractCommandText(text, "file")
+	if respondAsFile {
+		text = fileText
 	}
 
 	parts := make([]string, 0, 6)
