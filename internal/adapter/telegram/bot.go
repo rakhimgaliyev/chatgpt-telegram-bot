@@ -15,6 +15,23 @@ import (
 	"chatgpt-telegram-bot/internal/usecase/tts"
 )
 
+// commands is the single source of truth for the Telegram command menu.
+var commands = []tgbotapi.BotCommand{
+	{Command: "img", Description: "Generate an image (e.g. /img cat in space)"},
+	{Command: "tts", Description: "Text to speech (e.g. /tts hello)"},
+	{Command: "file", Description: "Get the answer as a file (e.g. /file write a report)"},
+	{Command: "reset", Description: "Forget the conversation history"},
+	{Command: "help", Description: "Show available commands"},
+}
+
+const helpText = `Just write a message (images are supported) and I will answer.
+
+/img <prompt> - generate an image
+/tts <text> - text to speech
+/file <prompt> - get the answer as a file
+/reset - forget the conversation history
+/help - show this message`
+
 type Bot struct {
 	api  *tgbotapi.BotAPI
 	cfg  config.Config
@@ -41,6 +58,8 @@ func NewBot(cfg config.Config, chatSvc *chat.Service, ttsSvc *tts.Service, imgSv
 }
 
 func (b *Bot) Run(ctx context.Context) error {
+	b.registerCommands()
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
@@ -83,6 +102,20 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	if ok, _ := extractCommandText(msg.Text, "help"); ok {
+		b.sendText(msg.Chat.ID, msg.MessageID, helpText)
+		return
+	}
+	if ok, _ := extractCommandText(msg.Text, "start"); ok {
+		b.sendText(msg.Chat.ID, msg.MessageID, helpText)
+		return
+	}
+	if ok, _ := extractCommandText(msg.Text, "reset"); ok {
+		b.chat.Reset(msg.Chat.ID)
+		b.sendText(msg.Chat.ID, msg.MessageID, "conversation history cleared")
+		return
+	}
+
 	if ok, text := extractCommandText(msg.Text, "tts"); ok {
 		if strings.TrimSpace(text) == "" {
 			b.sendText(msg.Chat.ID, msg.MessageID, "usage: /tts <text>")
@@ -108,7 +141,12 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	if ok, text := extractCommandText(msg.Text, "img"); ok {
+	ok, text := extractCommandText(msg.Text, "img")
+	if !ok {
+		// /image is kept as an alias from the old command menu
+		ok, text = extractCommandText(msg.Text, "image")
+	}
+	if ok {
 		if strings.TrimSpace(text) == "" {
 			b.sendText(msg.Chat.ID, msg.MessageID, "usage: /img <prompt>")
 			return
@@ -129,6 +167,14 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		if err := b.sendImage(msg.Chat.ID, msg.MessageID, imageResp); err != nil {
 			log.Printf("failed to send image: %v", err)
 			b.sendText(msg.Chat.ID, msg.MessageID, "could not send image")
+		}
+		return
+	}
+
+	if name, ok := unknownCommand(msg.Text, b.api.Self.UserName); ok {
+		// commands aimed at other bots in a group are none of our business
+		if name != "" {
+			b.sendText(msg.Chat.ID, msg.MessageID, "unknown command /"+name+"\n\n"+helpText)
 		}
 		return
 	}
@@ -170,6 +216,25 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	b.sendText(msg.Chat.ID, msg.MessageID, resp)
+}
+
+// registerCommands replaces the command menu shown in Telegram clients,
+// overriding menus left by older versions of the bot for every scope.
+func (b *Bot) registerCommands() {
+	scopes := []tgbotapi.BotCommandScope{
+		tgbotapi.NewBotCommandScopeDefault(),
+		tgbotapi.NewBotCommandScopeAllPrivateChats(),
+		tgbotapi.NewBotCommandScopeAllGroupChats(),
+	}
+	for _, scope := range scopes {
+		if _, err := b.api.Request(tgbotapi.NewSetMyCommandsWithScope(scope, commands...)); err != nil {
+			log.Printf("failed to set commands for scope %s: %v", scope.Type, err)
+		}
+	}
+	// admins get the group menu unless a dedicated one is set
+	if _, err := b.api.Request(tgbotapi.NewDeleteMyCommandsWithScope(tgbotapi.NewBotCommandScopeAllChatAdministrators())); err != nil {
+		log.Printf("failed to delete admin commands: %v", err)
+	}
 }
 
 func (b *Bot) sendText(chatID int64, replyTo int, text string) {
@@ -294,6 +359,30 @@ func hasUserContent(msg *tgbotapi.Message) bool {
 		msg.VideoNote != nil ||
 		msg.Sticker != nil ||
 		msg.Animation != nil
+}
+
+// unknownCommand reports whether text is a command this bot does not
+// handle. The returned name is empty when the command is addressed to a
+// different bot and must be ignored silently.
+func unknownCommand(text, botUsername string) (string, bool) {
+	text = strings.TrimSpace(text)
+	if !strings.HasPrefix(text, "/") {
+		return "", false
+	}
+	first := strings.TrimPrefix(strings.Fields(text)[0], "/")
+	name, target, _ := strings.Cut(first, "@")
+	if name == "" {
+		return "", false
+	}
+	for _, c := range commands {
+		if strings.EqualFold(name, c.Command) {
+			return "", false
+		}
+	}
+	if target != "" && !strings.EqualFold(target, botUsername) {
+		return "", true
+	}
+	return name, true
 }
 
 func isAllowedUser(userID int64, chatID int64, cfg config.Config) bool {

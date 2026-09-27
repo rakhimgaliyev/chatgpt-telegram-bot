@@ -110,6 +110,11 @@ func (s *Service) HandleMessage(ctx context.Context, chatID int64, input Input) 
 	return resp, nil
 }
 
+// Reset forgets the conversation history of the chat.
+func (s *Service) Reset(chatID int64) {
+	s.store.Reset(chatID)
+}
+
 func buildStoredContent(input Input) string {
 	content := strings.TrimSpace(input.Text)
 	if len(input.Images) > 0 {

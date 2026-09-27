@@ -24,6 +24,12 @@ func (s *Store) Add(chatID int64, msg domain.Message) {
 	s.conversations[chatID] = append(s.conversations[chatID], msg)
 }
 
+func (s *Store) Reset(chatID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.conversations, chatID)
+}
+
 func (s *Store) FreshMessages(chatID int64, limit int, ttl time.Duration) []domain.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
