@@ -8,7 +8,11 @@ import (
 	"chatgpt-telegram-bot/internal/config"
 )
 
-var ErrEmptyPrompt = errors.New("empty prompt")
+var (
+	ErrEmptyPrompt = errors.New("empty prompt")
+	// ErrModerationBlocked means OpenAI's safety system rejected the request.
+	ErrModerationBlocked = errors.New("rejected by openai safety system")
+)
 
 type Client interface {
 	Generate(ctx context.Context, req Request) (Response, error)

@@ -70,9 +70,17 @@ func (c *Client) createImage(ctx context.Context, req image.Request, format stri
 		Background:   strings.TrimSpace(req.Background),
 	})
 	if err != nil {
+		var apiErr *openaiapi.APIError
+		if errors.As(err, &apiErr) && isModerationError(fmt.Sprint(apiErr.Code), apiErr.Message) {
+			return nil, fmt.Errorf("%w: %s", image.ErrModerationBlocked, apiErr.Message)
+		}
 		return nil, err
 	}
 	return resp.Data, nil
+}
+
+func isModerationError(code, message string) bool {
+	return code == "moderation_blocked" || strings.Contains(message, "safety system")
 }
 
 func (c *Client) editImage(ctx context.Context, req image.Request, format string) ([]openaiapi.ImageResponseDataInner, error) {
@@ -139,12 +147,16 @@ func (c *Client) editImage(ctx context.Context, req image.Request, format string
 		Data  []openaiapi.ImageResponseDataInner `json:"data"`
 		Error *struct {
 			Message string `json:"message"`
+			Code    string `json:"code"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil && resp.StatusCode == http.StatusOK {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		if parsed.Error != nil && isModerationError(parsed.Error.Code, parsed.Error.Message) {
+			return nil, fmt.Errorf("%w: %s", image.ErrModerationBlocked, parsed.Error.Message)
+		}
 		if parsed.Error != nil && parsed.Error.Message != "" {
 			return nil, fmt.Errorf("openai image edit: %s", parsed.Error.Message)
 		}

@@ -172,6 +172,10 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 				return
 			}
 			log.Printf("image generation failed: %v", err)
+			if errors.Is(err, imagegen.ErrModerationBlocked) {
+				b.sendText(msg.Chat.ID, msg.MessageID, "openai's safety filter rejected this request, try a different prompt or image")
+				return
+			}
 			b.sendText(msg.Chat.ID, msg.MessageID, "failed to generate image, try again later")
 			return
 		}
