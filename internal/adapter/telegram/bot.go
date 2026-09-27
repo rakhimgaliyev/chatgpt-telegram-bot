@@ -13,6 +13,7 @@ import (
 	"chatgpt-telegram-bot/internal/config"
 	"chatgpt-telegram-bot/internal/usecase/chat"
 	imagegen "chatgpt-telegram-bot/internal/usecase/image"
+	"chatgpt-telegram-bot/internal/usecase/transcribe"
 	"chatgpt-telegram-bot/internal/usecase/tts"
 )
 
@@ -34,37 +35,45 @@ const helpText = `Just write a message (images are supported) and I will answer.
 /help - show this message`
 
 type Bot struct {
-	api  *tgbotapi.BotAPI
-	cfg  config.Config
-	chat *chat.Service
-	tts  *tts.Service
-	img  *imagegen.Service
-	now  func() time.Time
+	api          *tgbotapi.BotAPI
+	cfg          config.Config
+	chat         *chat.Service
+	tts          *tts.Service
+	img          *imagegen.Service
+	transcribe   *transcribe.Service
+	albums       *albumCollector
+	imageLimiter *rateLimiter
 }
 
-func NewBot(cfg config.Config, chatSvc *chat.Service, ttsSvc *tts.Service, imgSvc *imagegen.Service) (*Bot, error) {
+func NewBot(cfg config.Config, chatSvc *chat.Service, ttsSvc *tts.Service, imgSvc *imagegen.Service, transcribeSvc *transcribe.Service) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Bot{
-		api:  api,
-		cfg:  cfg,
-		chat: chatSvc,
-		tts:  ttsSvc,
-		img:  imgSvc,
-		now:  time.Now,
+		api:          api,
+		cfg:          cfg,
+		chat:         chatSvc,
+		tts:          ttsSvc,
+		img:          imgSvc,
+		transcribe:   transcribeSvc,
+		imageLimiter: newRateLimiter(cfg.ImageLimitPerHour, time.Hour),
 	}, nil
 }
 
 func (b *Bot) Run(ctx context.Context) error {
 	b.registerCommands()
+	b.albums = newAlbumCollector(func(msgs []*tgbotapi.Message) {
+		primary, rest := splitAlbum(msgs)
+		b.handleMessage(ctx, primary, rest)
+	})
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
 	updates := b.api.GetUpdatesChan(u)
+	defer b.api.StopReceivingUpdates()
 
 	for {
 		select {
@@ -83,69 +92,57 @@ func (b *Bot) Run(ctx context.Context) error {
 			if !hasUserContent(msg) {
 				continue
 			}
-			go b.handleMessage(ctx, msg)
+			if msg.MediaGroupID != "" {
+				b.albums.add(msg)
+				continue
+			}
+			go b.handleMessage(ctx, msg, nil)
 		}
 	}
 }
 
-func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
+// handleMessage processes msg; album holds the other messages of the same
+// media group when msg is part of one.
+func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message, album []*tgbotapi.Message) {
+	// a photo sent with "/img ..." carries the command in its caption
+	commandText := msg.Text
+	if commandText == "" {
+		commandText = msg.Caption
+	}
+
+	if isCommandForOtherBot(commandText, b.api.Self.UserName) {
+		return
+	}
+	if !msg.Chat.IsPrivate() && b.cfg.GroupMentionOnly && !b.isAddressed(msg, commandText) {
+		return
+	}
+
 	if !isAllowedUser(msg.From.ID, msg.Chat.ID, b.cfg) {
 		// in groups stay silent, otherwise the bot spams every message
 		// of a chat it was added to without permission
 		if !msg.Chat.IsPrivate() {
 			return
 		}
-		deny := tgbotapi.NewMessage(msg.Chat.ID, "access denied")
-		deny.ReplyToMessageID = msg.MessageID
-		if _, err := b.api.Send(deny); err != nil {
-			log.Printf("failed to send deny message: %v", err)
-		}
+		b.sendText(msg.Chat.ID, msg.MessageID, "access denied")
 		return
 	}
 
-	if ok, _ := extractCommandText(msg.Text, "help"); ok {
+	if ok, _ := extractCommandText(commandText, "help"); ok {
 		b.sendText(msg.Chat.ID, msg.MessageID, helpText)
 		return
 	}
-	if ok, _ := extractCommandText(msg.Text, "start"); ok {
+	if ok, _ := extractCommandText(commandText, "start"); ok {
 		b.sendText(msg.Chat.ID, msg.MessageID, helpText)
 		return
 	}
-	if ok, _ := extractCommandText(msg.Text, "reset"); ok {
+	if ok, _ := extractCommandText(commandText, "reset"); ok {
 		b.chat.Reset(msg.Chat.ID)
 		b.sendText(msg.Chat.ID, msg.MessageID, "conversation history cleared")
 		return
 	}
-
-	if ok, text := extractCommandText(msg.Text, "tts"); ok {
-		if strings.TrimSpace(text) == "" {
-			b.sendText(msg.Chat.ID, msg.MessageID, "usage: /tts <text>")
-			return
-		}
-
-		b.sendVoiceAction(msg.Chat.ID)
-		audio, err := b.tts.Synthesize(ctx, text)
-		if err != nil {
-			if errors.Is(err, tts.ErrEmptyText) {
-				b.sendText(msg.Chat.ID, msg.MessageID, "i need some text to synthesize")
-				return
-			}
-			log.Printf("tts request failed: %v", err)
-			b.sendText(msg.Chat.ID, msg.MessageID, "failed to generate audio, try again later")
-			return
-		}
-
-		if err := b.sendVoice(msg.Chat.ID, msg.MessageID, audio); err != nil {
-			log.Printf("failed to send voice: %v", err)
-			b.sendText(msg.Chat.ID, msg.MessageID, "could not send voice message")
-		}
+	if ok, text := extractCommandText(commandText, "tts"); ok {
+		b.handleTTS(ctx, msg, text)
 		return
-	}
-
-	// a photo sent with "/img ..." carries the command in its caption
-	commandText := msg.Text
-	if commandText == "" {
-		commandText = msg.Caption
 	}
 	ok, text := extractCommandText(commandText, "img")
 	if !ok {
@@ -153,76 +150,112 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		ok, text = extractCommandText(commandText, "image")
 	}
 	if ok {
-		if strings.TrimSpace(text) == "" {
-			b.sendText(msg.Chat.ID, msg.MessageID, "usage: /img <prompt>\nattach a photo or reply to one to edit it")
-			return
-		}
-
-		b.sendPhotoAction(msg.Chat.ID)
-		inputs, err := b.collectInputImages(msg)
-		if err != nil {
-			log.Printf("could not load input image: %v", err)
-			b.sendText(msg.Chat.ID, msg.MessageID, "could not load the source image, only png, jpeg and webp are supported")
-			return
-		}
-		imageResp, err := b.img.Generate(ctx, text, inputs...)
-		if err != nil {
-			if errors.Is(err, imagegen.ErrEmptyPrompt) {
-				b.sendText(msg.Chat.ID, msg.MessageID, "i need a prompt to generate an image")
-				return
-			}
-			log.Printf("image generation failed: %v", err)
-			if errors.Is(err, imagegen.ErrModerationBlocked) {
-				b.sendText(msg.Chat.ID, msg.MessageID, "openai's safety filter rejected this request, try a different prompt or image")
-				return
-			}
-			b.sendText(msg.Chat.ID, msg.MessageID, "failed to generate image, try again later")
-			return
-		}
-
-		if err := b.sendImage(msg.Chat.ID, msg.MessageID, imageResp); err != nil {
-			log.Printf("failed to send image: %v", err)
-			b.sendText(msg.Chat.ID, msg.MessageID, "could not send image")
-		}
+		b.handleImage(ctx, msg, album, text)
 		return
 	}
-
-	if name, ok := unknownCommand(msg.Text, b.api.Self.UserName); ok {
-		// commands aimed at other bots in a group are none of our business
+	if name, ok := unknownCommand(commandText, b.api.Self.UserName); ok {
 		if name != "" {
 			b.sendText(msg.Chat.ID, msg.MessageID, "unknown command /"+name+"\n\n"+helpText)
 		}
 		return
 	}
 
-	userInput, respondAsFile := BuildUserInput(b.api, msg)
-	b.sendChatAction(msg.Chat.ID, respondAsFile)
+	b.handleChat(ctx, msg, album)
+}
 
-	resp, err := b.chat.HandleMessage(ctx, msg.Chat.ID, userInput)
+func (b *Bot) handleTTS(ctx context.Context, msg *tgbotapi.Message, text string) {
+	if strings.TrimSpace(text) == "" {
+		b.sendText(msg.Chat.ID, msg.MessageID, "usage: /tts <text>")
+		return
+	}
+
+	stop := b.keepAction(ctx, msg.Chat.ID, tgbotapi.ChatRecordVoice)
+	audio, err := b.tts.Synthesize(ctx, text)
+	stop()
 	if err != nil {
-		if errors.Is(err, chat.ErrEmptyMessage) {
-			b.sendText(msg.Chat.ID, msg.MessageID, "i need some content to work with")
-			return
+		switch {
+		case errors.Is(err, tts.ErrEmptyText):
+			b.sendText(msg.Chat.ID, msg.MessageID, "i need some text to synthesize")
+		case errors.Is(err, tts.ErrTextTooLong):
+			b.sendText(msg.Chat.ID, msg.MessageID, fmt.Sprintf("text is too long, the limit is %d characters", tts.MaxTextLength))
+		default:
+			log.Printf("tts request failed: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "failed to generate audio, try again later")
 		}
-		log.Printf("openai request failed: %v", err)
-		if errors.Is(err, chat.ErrEmptyResponse) {
-			b.sendText(msg.Chat.ID, msg.MessageID, "the model returned an empty answer, try rephrasing or raise MAX_TOKENS")
-			return
-		}
-		b.sendText(msg.Chat.ID, msg.MessageID, "failed to reach openai, try again later")
 		return
 	}
 
+	if err := b.sendVoice(msg.Chat.ID, msg.MessageID, audio); err != nil {
+		log.Printf("failed to send voice: %v", err)
+		b.sendText(msg.Chat.ID, msg.MessageID, "could not send voice message")
+	}
+}
+
+func (b *Bot) handleImage(ctx context.Context, msg *tgbotapi.Message, album []*tgbotapi.Message, prompt string) {
+	if strings.TrimSpace(prompt) == "" {
+		b.sendText(msg.Chat.ID, msg.MessageID, "usage: /img <prompt>\nattach a photo or reply to one to edit it")
+		return
+	}
+	if !b.isAdmin(msg.From.ID) && !b.imageLimiter.allow(msg.From.ID) {
+		b.sendText(msg.Chat.ID, msg.MessageID, fmt.Sprintf("image limit reached (%d per hour), try again later", b.cfg.ImageLimitPerHour))
+		return
+	}
+
+	stop := b.keepAction(ctx, msg.Chat.ID, tgbotapi.ChatUploadPhoto)
+	defer stop()
+
+	inputs, err := b.collectInputImages(msg, album)
+	if err != nil {
+		log.Printf("could not load input image: %v", err)
+		b.sendText(msg.Chat.ID, msg.MessageID, "could not load the source image, only png, jpeg and webp are supported")
+		return
+	}
+	imageResp, err := b.img.Generate(ctx, prompt, inputs...)
+	if err != nil {
+		switch {
+		case errors.Is(err, imagegen.ErrEmptyPrompt):
+			b.sendText(msg.Chat.ID, msg.MessageID, "i need a prompt to generate an image")
+		case errors.Is(err, imagegen.ErrModerationBlocked):
+			log.Printf("image generation failed: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "openai's safety filter rejected this request, try a different prompt or image")
+		default:
+			log.Printf("image generation failed: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "failed to generate image, try again later")
+		}
+		return
+	}
+
+	if err := b.sendImage(msg.Chat.ID, msg.MessageID, imageResp); err != nil {
+		log.Printf("failed to send image: %v", err)
+		b.sendText(msg.Chat.ID, msg.MessageID, "could not send image")
+	}
+}
+
+func (b *Bot) handleChat(ctx context.Context, msg *tgbotapi.Message, album []*tgbotapi.Message) {
+	userInput, respondAsFile := b.buildUserInput(ctx, msg, album)
+
+	action := tgbotapi.ChatTyping
 	if respondAsFile {
-		if err := b.sendAsFile(msg.Chat.ID, msg.MessageID, resp); err != nil {
-			log.Printf("failed to send file: %v", err)
-			b.sendText(msg.Chat.ID, msg.MessageID, "could not send file, here is the text")
-			b.sendText(msg.Chat.ID, msg.MessageID, resp)
+		action = tgbotapi.ChatUploadDocument
+	}
+	stop := b.keepAction(ctx, msg.Chat.ID, action)
+	resp, err := b.chat.HandleMessage(ctx, msg.Chat.ID, userInput)
+	stop()
+	if err != nil {
+		switch {
+		case errors.Is(err, chat.ErrEmptyMessage):
+			b.sendText(msg.Chat.ID, msg.MessageID, "i need some content to work with")
+		case errors.Is(err, chat.ErrEmptyResponse):
+			log.Printf("openai request failed: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "the model returned an empty answer, try rephrasing or raise MAX_TOKENS")
+		default:
+			log.Printf("openai request failed: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "failed to reach openai, try again later")
 		}
 		return
 	}
 
-	if shouldSendAsFile(resp) {
+	if respondAsFile || shouldSendAsFile(resp) {
 		if err := b.sendAsFile(msg.Chat.ID, msg.MessageID, resp); err != nil {
 			log.Printf("failed to send file: %v", err)
 			b.sendText(msg.Chat.ID, msg.MessageID, "could not send file, here is the text")
@@ -234,11 +267,14 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	b.sendFormatted(msg.Chat.ID, msg.MessageID, resp)
 }
 
-// collectInputImages loads the images to edit: the one attached to the
-// command message and the one in the message it replies to.
-func (b *Bot) collectInputImages(msg *tgbotapi.Message) ([]imagegen.InputImage, error) {
+// collectInputImages loads the images to edit: those attached to the
+// command message or its album and the one in the message it replies to.
+func (b *Bot) collectInputImages(msg *tgbotapi.Message, album []*tgbotapi.Message) ([]imagegen.InputImage, error) {
+	sources := append([]*tgbotapi.Message{msg}, album...)
+	sources = append(sources, msg.ReplyToMessage)
+
 	var inputs []imagegen.InputImage
-	for _, m := range []*tgbotapi.Message{msg, msg.ReplyToMessage} {
+	for _, m := range sources {
 		fileID, mimeType, ok := imageSource(m)
 		if !ok {
 			continue
@@ -254,6 +290,15 @@ func (b *Bot) collectInputImages(msg *tgbotapi.Message) ([]imagegen.InputImage, 
 		inputs = append(inputs, imagegen.InputImage{Data: data, MimeType: detected})
 	}
 	return inputs, nil
+}
+
+func (b *Bot) isAdmin(userID int64) bool {
+	for _, id := range b.cfg.AdminUserIDs {
+		if id == userID {
+			return true
+		}
+	}
+	return false
 }
 
 // registerCommands replaces the command menu shown in Telegram clients,
@@ -299,28 +344,6 @@ func (b *Bot) sendFormatted(chatID int64, replyTo int, text string) {
 	if _, err := b.api.Send(msg); err != nil {
 		log.Printf("failed to send formatted reply, falling back to plain text: %v", err)
 		b.sendText(chatID, replyTo, text)
-	}
-}
-
-func (b *Bot) sendChatAction(chatID int64, asFile bool) {
-	action := tgbotapi.ChatTyping
-	if asFile {
-		action = tgbotapi.ChatUploadDocument
-	}
-	if _, err := b.api.Request(tgbotapi.NewChatAction(chatID, action)); err != nil {
-		log.Printf("failed to send chat action: %v", err)
-	}
-}
-
-func (b *Bot) sendVoiceAction(chatID int64) {
-	if _, err := b.api.Request(tgbotapi.NewChatAction(chatID, tgbotapi.ChatUploadVoice)); err != nil {
-		log.Printf("failed to send chat action: %v", err)
-	}
-}
-
-func (b *Bot) sendPhotoAction(chatID int64) {
-	if _, err := b.api.Request(tgbotapi.NewChatAction(chatID, tgbotapi.ChatUploadPhoto)); err != nil {
-		log.Printf("failed to send chat action: %v", err)
 	}
 }
 
@@ -464,28 +487,60 @@ func isAllowedUser(userID int64, chatID int64, cfg config.Config) bool {
 	return false
 }
 
-func BuildUserInput(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) (chat.Input, bool) {
+// maxQuotedRunes caps how much of a replied-to message goes into the prompt.
+const maxQuotedRunes = 3000
+
+// buildUserInput assembles the prompt from the message, its album, the
+// message it replies to and, in groups, the sender name.
+func (b *Bot) buildUserInput(ctx context.Context, msg *tgbotapi.Message, album []*tgbotapi.Message) (chat.Input, bool) {
 	text := msg.Text
 	respondAsFile, fileText := extractCommandText(text, "file")
 	if respondAsFile {
 		text = fileText
 	}
+	group := !msg.Chat.IsPrivate()
 
-	parts := make([]string, 0, 6)
-	if text != "" {
+	parts := make([]string, 0, 8)
+	if group {
+		parts = append(parts, "["+displayName(msg.From)+"]:")
+	}
+	if text = b.stripMention(text); text != "" {
 		parts = append(parts, text)
 	}
-	if msg.Caption != "" {
-		parts = append(parts, "Caption: "+msg.Caption)
+	if caption := b.stripMention(msg.Caption); caption != "" {
+		parts = append(parts, caption)
 	}
 
-	attachmentParts, images := DescribeAttachments(bot, msg)
-	parts = append(parts, attachmentParts...)
+	var images []chat.Image
+	for _, m := range append([]*tgbotapi.Message{msg}, album...) {
+		attachmentParts, imgs := b.describeAttachments(ctx, m)
+		parts = append(parts, attachmentParts...)
+		images = append(images, imgs...)
+	}
+
+	if r := msg.ReplyToMessage; r != nil && hasUserContent(r) {
+		quoted := make([]string, 0, 4)
+		if t := strings.TrimSpace(r.Text + "\n" + r.Caption); t != "" {
+			quoted = append(quoted, truncateRunes(t, maxQuotedRunes))
+		}
+		attachmentParts, imgs := b.describeAttachments(ctx, r)
+		quoted = append(quoted, attachmentParts...)
+		images = append(images, imgs...)
+		parts = append(parts, "\nIn reply to a message from "+displayName(r.From)+":\n"+strings.Join(quoted, "\n"))
+	}
 
 	return chat.Input{
-		Text:   strings.Join(parts, "\n"),
+		Text:   strings.TrimSpace(strings.Join(parts, "\n")),
 		Images: images,
 	}, respondAsFile
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
 }
 
 func splitText(text string, chunkSize int) []string {

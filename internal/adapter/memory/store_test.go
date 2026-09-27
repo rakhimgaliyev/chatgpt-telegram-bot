@@ -31,3 +31,22 @@ func TestFreshMessagesPrunes(t *testing.T) {
 		t.Error("expired chat must be removed from the store")
 	}
 }
+
+func TestAddKeepsImagesOnlyForRecentMessages(t *testing.T) {
+	s := NewStore()
+	for i := 0; i < maxImageMessages+2; i++ {
+		s.Add(1, domain.Message{Content: "img", Images: []string{"data"}, Timestamp: time.Now()})
+	}
+	withImages := 0
+	for _, m := range s.conversations[1] {
+		if len(m.Images) > 0 {
+			withImages++
+		}
+	}
+	if withImages != maxImageMessages {
+		t.Errorf("%d messages keep images, want %d", withImages, maxImageMessages)
+	}
+	if len(s.conversations[1][len(s.conversations[1])-1].Images) == 0 {
+		t.Error("the newest message must keep its image")
+	}
+}

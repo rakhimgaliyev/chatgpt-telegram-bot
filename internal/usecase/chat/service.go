@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"chatgpt-telegram-bot/internal/config"
@@ -45,6 +46,9 @@ type Service struct {
 	client Client
 	cfg    config.Config
 	now    func() time.Time
+
+	locksMu sync.Mutex
+	locks   map[int64]*sync.Mutex
 }
 
 func NewService(store domain.ConversationStore, client Client, cfg config.Config) *Service {
@@ -53,7 +57,21 @@ func NewService(store domain.ConversationStore, client Client, cfg config.Config
 		client: client,
 		cfg:    cfg,
 		now:    time.Now,
+		locks:  make(map[int64]*sync.Mutex),
 	}
+}
+
+// chatLock serializes requests of one chat so that each message sees the
+// previous turn in its history.
+func (s *Service) chatLock(chatID int64) *sync.Mutex {
+	s.locksMu.Lock()
+	defer s.locksMu.Unlock()
+	l, ok := s.locks[chatID]
+	if !ok {
+		l = &sync.Mutex{}
+		s.locks[chatID] = l
+	}
+	return l
 }
 
 func (s *Service) HandleMessage(ctx context.Context, chatID int64, input Input) (string, error) {
@@ -61,9 +79,19 @@ func (s *Service) HandleMessage(ctx context.Context, chatID int64, input Input) 
 		return "", ErrEmptyMessage
 	}
 
+	lock := s.chatLock(chatID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	images := make([]string, 0, len(input.Images))
+	for _, img := range input.Images {
+		images = append(images, img.DataURL)
+	}
+
 	userMessage := domain.Message{
 		Role:      domain.RoleUser,
 		Content:   buildStoredContent(input),
+		Images:    images,
 		Timestamp: s.now(),
 	}
 
@@ -76,18 +104,16 @@ func (s *Service) HandleMessage(ctx context.Context, chatID int64, input Input) 
 	})
 	for _, h := range history {
 		messages = append(messages, Message{
-			Role: h.Role,
-			Text: h.Content,
+			Role:   h.Role,
+			Text:   h.Content,
+			Images: h.Images,
 		})
 	}
-	userParts := Message{
-		Role: domain.RoleUser,
-		Text: input.Text,
-	}
-	for _, img := range input.Images {
-		userParts.Images = append(userParts.Images, img.DataURL)
-	}
-	messages = append(messages, userParts)
+	messages = append(messages, Message{
+		Role:   domain.RoleUser,
+		Text:   input.Text,
+		Images: images,
+	})
 
 	resp, err := s.client.Complete(ctx, CompletionRequest{
 		Model:               s.cfg.Model,

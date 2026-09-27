@@ -14,7 +14,10 @@ Go Telegram bot that proxies users to OpenAI chat completions (non-streaming). S
 - `/img <prompt>` as a photo caption, or as a reply to a photo, edits that image; with both it combines the two.
 - `/reset` clears the conversation history, `/help` lists commands.
 - The Telegram command menu is registered on startup, replacing menus left by older versions.
-- Handles attachments (photos, docs, audio/video/voice/sticker/animation) by describing them in the prompt; images are passed to OpenAI.
+- Voice messages, round videos, audio and video are transcribed; text and code documents are inlined into the prompt; images are passed to OpenAI and stay in context for the last few messages.
+- Albums are handled as one message; replying to a message passes its text, images and transcripts to the model.
+- In groups the bot answers only when mentioned, replied to or given a command (`GROUP_MENTION_ONLY`), and the model sees who wrote each message.
+- Replies are rendered as Telegram HTML (code blocks, bold, links).
 
 ## Config (.env)
 See `.env.example`:
@@ -24,6 +27,7 @@ See `.env.example`:
 - `OPENAI_TTS_MODEL` (default `gpt-4o-mini-tts`)
 - `OPENAI_TTS_VOICE` (default `alloy`)
 - `OPENAI_TTS_FORMAT` (default `opus`, recommended for voice messages)
+- `OPENAI_TRANSCRIBE_MODEL` (default `gpt-transcribe`)
 - `OPENAI_IMAGE_MODEL` (default `gpt-image-2.5-flare`, used with the Images API)
 - `OPENAI_IMAGE_SIZE` (default `auto`)
 - `OPENAI_IMAGE_QUALITY` (default `auto`)
@@ -36,6 +40,8 @@ See `.env.example`:
 - `MAX_TOKENS` (max completion tokens, default `4096`)
 - `CONTEXT_MESSAGE_LIMIT` (default `20`)
 - `CONTEXT_TTL_MINUTES` (default `120`)
+- `GROUP_MENTION_ONLY` (default `true`; `false` makes the bot answer every group message)
+- `IMAGE_LIMIT_PER_HOUR` (per user, admins exempt, `0` disables, default `20`)
 
 Values can be set via environment or `.env`; `.env` is loaded if present.
 

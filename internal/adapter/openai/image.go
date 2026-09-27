@@ -125,7 +125,7 @@ func (c *Client) editImage(ctx context.Context, req image.Request, format string
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, imageEditsEndpoint, &body)
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.imageEditsURL, &body)
 	if err != nil {
 		return nil, err
 	}

@@ -8,7 +8,13 @@ import (
 	"chatgpt-telegram-bot/internal/config"
 )
 
-var ErrEmptyText = errors.New("empty text")
+var (
+	ErrEmptyText   = errors.New("empty text")
+	ErrTextTooLong = errors.New("text too long")
+)
+
+// MaxTextLength is the input limit of the speech endpoint.
+const MaxTextLength = 4096
 
 type Client interface {
 	Speech(ctx context.Context, req Request) (Response, error)
@@ -41,6 +47,9 @@ func NewService(client Client, cfg config.Config) *Service {
 func (s *Service) Synthesize(ctx context.Context, text string) (Response, error) {
 	if strings.TrimSpace(text) == "" {
 		return Response{}, ErrEmptyText
+	}
+	if len([]rune(text)) > MaxTextLength {
+		return Response{}, ErrTextTooLong
 	}
 
 	return s.client.Speech(ctx, Request{

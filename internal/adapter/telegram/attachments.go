@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -12,143 +13,179 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"chatgpt-telegram-bot/internal/usecase/chat"
 )
 
-// maxImageBytes guards against pulling huge image documents into memory
-// and sending them to OpenAI; Telegram bots can download up to 20 MB.
-const maxImageBytes = 20 << 20
+const (
+	// maxDownloadBytes is the Telegram Bot API download limit; it also
+	// guards against pulling huge files into memory.
+	maxDownloadBytes = 20 << 20
+	// maxTextFileBytes caps text documents inlined into the prompt.
+	maxTextFileBytes = 100 << 10
+)
 
 var fileClient = &http.Client{Timeout: 60 * time.Second}
 
-func DescribeAttachments(bot *tgbotapi.BotAPI, msg *tgbotapi.Message) ([]string, []chat.Image) {
-	parts := make([]string, 0, 8)
-	images := make([]chat.Image, 0, 4)
+// describeAttachments turns the attachments of msg into prompt text and
+// images: photos are passed as images, audio and video are transcribed and
+// text documents are inlined.
+func (b *Bot) describeAttachments(ctx context.Context, msg *tgbotapi.Message) ([]string, []chat.Image) {
+	parts := make([]string, 0, 4)
+	images := make([]chat.Image, 0, 1)
 
 	if msg.Document != nil {
-		part, img := describeDocument(bot, msg.Document)
+		part, img := b.describeDocument(msg.Document)
 		parts = append(parts, part)
 		if img.DataURL != "" {
 			images = append(images, img)
 		}
 	}
 	if len(msg.Photo) > 0 {
-		part, imgs := describePhoto(bot, msg.Photo)
-		parts = append(parts, part)
-		images = append(images, imgs...)
-	}
-	if msg.Audio != nil {
-		parts = append(parts, describeAudio(bot, msg.Audio))
+		best := msg.Photo[len(msg.Photo)-1]
+		parts = append(parts, fmt.Sprintf("Photo: resolution %dx%d.", best.Width, best.Height))
+		if dataURL, err := fetchDataURL(b.api, best.FileID, "image/jpeg"); err != nil {
+			log.Printf("could not fetch photo: %v", err)
+		} else {
+			images = append(images, chat.Image{DataURL: dataURL})
+		}
 	}
 	if msg.Voice != nil {
-		parts = append(parts, describeVoice(bot, msg.Voice))
-	}
-	if msg.Video != nil {
-		parts = append(parts, describeVideo(bot, msg.Video))
+		label := fmt.Sprintf("Voice message (%d sec)", msg.Voice.Duration)
+		parts = append(parts, b.transcribeMedia(ctx, label, msg.Voice.FileID, "voice.ogg", msg.Voice.FileSize))
 	}
 	if msg.VideoNote != nil {
-		parts = append(parts, describeVideoNote(bot, msg.VideoNote))
+		label := fmt.Sprintf("Round video message (%d sec)", msg.VideoNote.Duration)
+		parts = append(parts, b.transcribeMedia(ctx, label, msg.VideoNote.FileID, "video.mp4", msg.VideoNote.FileSize))
+	}
+	if msg.Audio != nil {
+		label := fmt.Sprintf("Audio %q (%d sec)", strings.TrimSpace(msg.Audio.Performer+" "+msg.Audio.Title), msg.Audio.Duration)
+		parts = append(parts, b.transcribeMedia(ctx, label, msg.Audio.FileID, mediaFilename("audio", msg.Audio.MimeType), msg.Audio.FileSize))
+	}
+	if msg.Video != nil {
+		label := fmt.Sprintf("Video %dx%d (%d sec)", msg.Video.Width, msg.Video.Height, msg.Video.Duration)
+		parts = append(parts, b.transcribeMedia(ctx, label, msg.Video.FileID, mediaFilename("video", msg.Video.MimeType), msg.Video.FileSize))
 	}
 	if msg.Sticker != nil {
-		parts = append(parts, fmt.Sprintf(
-			"Sticker received: set %s, emoji %s",
-			msg.Sticker.SetName, msg.Sticker.Emoji,
-		))
+		parts = append(parts, fmt.Sprintf("Sticker: emoji %s (set %s).", msg.Sticker.Emoji, msg.Sticker.SetName))
 	}
 	if msg.Animation != nil {
-		part, img := describeAnimation(bot, msg.Animation)
-		parts = append(parts, part)
-		if img.DataURL != "" {
-			images = append(images, img)
-		}
+		parts = append(parts, fmt.Sprintf("GIF animation (%d sec), its content is not visible to you.", msg.Animation.Duration))
 	}
 
 	return parts, images
 }
 
-func describeDocument(bot *tgbotapi.BotAPI, doc *tgbotapi.Document) (string, chat.Image) {
-	part := fmt.Sprintf(
-		"Document: %s (%d bytes, mime %s).",
-		doc.FileName, doc.FileSize, doc.MimeType,
-	)
+func (b *Bot) describeDocument(doc *tgbotapi.Document) (string, chat.Image) {
+	part := fmt.Sprintf("Document: %s (%d bytes, mime %s).", doc.FileName, doc.FileSize, doc.MimeType)
+
 	if strings.HasPrefix(doc.MimeType, "image/") {
-		dataURL, err := fetchDataURL(bot, doc.FileID, doc.MimeType)
+		dataURL, err := fetchDataURL(b.api, doc.FileID, doc.MimeType)
 		if err != nil {
 			log.Printf("could not fetch image document: %v", err)
 			return part, chat.Image{}
 		}
 		return part, chat.Image{DataURL: dataURL}
 	}
-	return part, chat.Image{}
-}
 
-func describePhoto(bot *tgbotapi.BotAPI, photos []tgbotapi.PhotoSize) (string, []chat.Image) {
-	best := photos[len(photos)-1]
-	part := fmt.Sprintf(
-		"Photo: resolution %dx%d (%d bytes).",
-		best.Width, best.Height, best.FileSize,
-	)
-	dataURL, err := fetchDataURL(bot, best.FileID, "image/jpeg")
+	if !isTextDocument(doc.FileName, doc.MimeType) {
+		return part, chat.Image{}
+	}
+	if doc.FileSize > maxTextFileBytes {
+		return part + " It is too large to read.", chat.Image{}
+	}
+	data, _, err := fetchFile(b.api, doc.FileID, maxTextFileBytes)
 	if err != nil {
-		log.Printf("could not fetch photo: %v", err)
-		return part, nil
+		log.Printf("could not fetch text document: %v", err)
+		return part, chat.Image{}
 	}
-	return part, []chat.Image{{DataURL: dataURL}}
-}
-
-func describeAudio(bot *tgbotapi.BotAPI, audio *tgbotapi.Audio) string {
-	return fmt.Sprintf(
-		"Audio: %s (%d sec, %d bytes, mime %s).",
-		audio.Title, audio.Duration, audio.FileSize, audio.MimeType,
-	)
-}
-
-func describeVoice(bot *tgbotapi.BotAPI, voice *tgbotapi.Voice) string {
-	return fmt.Sprintf(
-		"Voice message: duration %d sec (%d bytes, mime %s).",
-		voice.Duration, voice.FileSize, voice.MimeType,
-	)
-}
-
-func describeVideo(bot *tgbotapi.BotAPI, video *tgbotapi.Video) string {
-	return fmt.Sprintf(
-		"Video: resolution %dx%d (%d sec, %d bytes, mime %s).",
-		video.Width, video.Height, video.Duration,
-		video.FileSize, video.MimeType,
-	)
-}
-
-func describeVideoNote(bot *tgbotapi.BotAPI, note *tgbotapi.VideoNote) string {
-	return fmt.Sprintf(
-		"Video note: resolution %dx%d (%d sec, %d bytes).",
-		note.Length, note.Length, note.Duration, note.FileSize,
-	)
-}
-
-func describeAnimation(bot *tgbotapi.BotAPI, animation *tgbotapi.Animation) (string, chat.Image) {
-	name := animation.FileName
-	if name == "" {
-		name = filepath.Base(animation.FileID)
+	if !utf8.Valid(data) {
+		return part + " It is not valid UTF-8 text.", chat.Image{}
 	}
-	part := fmt.Sprintf(
-		"Animation: %s (%d bytes, mime %s).",
-		name, animation.FileSize, animation.MimeType,
-	)
-	if strings.HasPrefix(animation.MimeType, "image/") {
-		dataURL, err := fetchDataURL(bot, animation.FileID, animation.MimeType)
-		if err != nil {
-			log.Printf("could not fetch animation image: %v", err)
-			return part, chat.Image{}
-		}
-		return part, chat.Image{DataURL: dataURL}
-	}
-	return part, chat.Image{}
+	return fmt.Sprintf("Document %s content:\n```\n%s\n```", doc.FileName, data), chat.Image{}
 }
 
-func fetchImage(bot *tgbotapi.BotAPI, fileID, fallbackMime string) ([]byte, string, error) {
+// transcribeMedia downloads audio or video and returns its transcript,
+// falling back to a plain description when that is not possible.
+func (b *Bot) transcribeMedia(ctx context.Context, label, fileID, filename string, size int) string {
+	fallback := label + ", could not be transcribed."
+	if b.transcribe == nil || filename == "" {
+		return label + ", its format cannot be transcribed."
+	}
+	if size > maxDownloadBytes {
+		return label + ", too large to transcribe."
+	}
+
+	data, _, err := fetchFile(b.api, fileID, maxDownloadBytes)
+	if err != nil {
+		log.Printf("could not fetch media: %v", err)
+		return fallback
+	}
+	text, err := b.transcribe.Transcribe(ctx, filename, data)
+	if err != nil {
+		log.Printf("transcription failed: %v", err)
+		return fallback
+	}
+	if text == "" {
+		return label + ", no speech detected."
+	}
+	return label + " transcript:\n" + text
+}
+
+// transcribableTypes maps mime types to extensions the transcription
+// endpoint accepts.
+var transcribableTypes = map[string]string{
+	"audio/mpeg":  "mp3",
+	"audio/mp3":   "mp3",
+	"audio/ogg":   "ogg",
+	"audio/opus":  "ogg",
+	"audio/mp4":   "m4a",
+	"audio/m4a":   "m4a",
+	"audio/x-m4a": "m4a",
+	"audio/aac":   "m4a",
+	"audio/wav":   "wav",
+	"audio/x-wav": "wav",
+	"audio/flac":  "flac",
+	"audio/webm":  "webm",
+	"video/mp4":   "mp4",
+	"video/webm":  "webm",
+}
+
+func mediaFilename(base, mimeType string) string {
+	ext, ok := transcribableTypes[strings.ToLower(mimeType)]
+	if !ok {
+		return ""
+	}
+	return base + "." + ext
+}
+
+var textExtensions = map[string]bool{
+	".txt": true, ".md": true, ".csv": true, ".tsv": true, ".log": true,
+	".json": true, ".yaml": true, ".yml": true, ".toml": true, ".ini": true, ".xml": true,
+	".html": true, ".css": true, ".js": true, ".ts": true, ".jsx": true, ".tsx": true,
+	".go": true, ".py": true, ".rb": true, ".php": true, ".java": true, ".kt": true,
+	".swift": true, ".c": true, ".h": true, ".cpp": true, ".hpp": true, ".cs": true,
+	".rs": true, ".sh": true, ".sql": true, ".proto": true, ".tex": true,
+}
+
+func isTextDocument(name, mimeType string) bool {
+	mimeType = strings.ToLower(mimeType)
+	if strings.HasPrefix(mimeType, "text/") {
+		return true
+	}
+	switch mimeType {
+	case "application/json", "application/xml", "application/x-yaml", "application/javascript", "application/x-sh", "application/sql":
+		return true
+	}
+	return textExtensions[strings.ToLower(filepath.Ext(name))]
+}
+
+// fetchFile downloads a Telegram file of at most maxBytes and returns its
+// data and the server-declared content type.
+func fetchFile(bot *tgbotapi.BotAPI, fileID string, maxBytes int) ([]byte, string, error) {
 	file, err := bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
 	if err != nil {
 		return nil, "", err
@@ -170,39 +207,36 @@ func fetchImage(bot *tgbotapi.BotAPI, fileID, fallbackMime string) ([]byte, stri
 		return nil, "", fmt.Errorf("download %s: status %d", file.FilePath, resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
 	if err != nil {
 		return nil, "", err
 	}
-	if len(data) > maxImageBytes {
-		return nil, "", fmt.Errorf("download %s: file larger than %d bytes", file.FilePath, maxImageBytes)
+	if len(data) > maxBytes {
+		return nil, "", fmt.Errorf("download %s: file larger than %d bytes", file.FilePath, maxBytes)
 	}
 
-	mimeType := resp.Header.Get("Content-Type")
-	// prefer declared image mime; otherwise try fallback and extension
-	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
-		if strings.HasPrefix(strings.ToLower(fallbackMime), "image/") {
-			mimeType = fallbackMime
-		} else {
-			extMime := mime.TypeByExtension(filepath.Ext(file.FilePath))
-			if strings.HasPrefix(strings.ToLower(extMime), "image/") {
-				mimeType = extMime
-			}
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(strings.ToLower(contentType), "image/") {
+		// Telegram often answers application/octet-stream, the extension of
+		// the stored file is a better hint
+		if extMime := mime.TypeByExtension(filepath.Ext(file.FilePath)); extMime != "" {
+			contentType = extMime
 		}
 	}
-	if mimeType == "" {
-		mimeType = fallbackMime
-	}
-	if mimeType == "" {
-		mimeType = mime.TypeByExtension(filepath.Ext(file.FilePath))
-	}
-	if mimeType == "" {
-		return nil, "", fmt.Errorf("non-image mime: unknown")
+	return data, contentType, nil
+}
+
+func fetchImage(bot *tgbotapi.BotAPI, fileID, fallbackMime string) ([]byte, string, error) {
+	data, mimeType, err := fetchFile(bot, fileID, maxDownloadBytes)
+	if err != nil {
+		return nil, "", err
 	}
 	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
-		return nil, "", fmt.Errorf("non-image mime: %s", mimeType)
+		mimeType = fallbackMime
 	}
-
+	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+		return nil, "", fmt.Errorf("non-image mime: %q", mimeType)
+	}
 	return data, mimeType, nil
 }
 

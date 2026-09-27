@@ -19,6 +19,7 @@ type Config struct {
 	TTSModel            string
 	TTSVoice            string
 	TTSFormat           string
+	TranscribeModel     string
 	ImageModel          string
 	ImageSize           string
 	ImageQuality        string
@@ -28,6 +29,8 @@ type Config struct {
 	MaxCompletionTokens int
 	ContextLimit        int
 	ContextTTL          time.Duration
+	GroupMentionOnly    bool
+	ImageLimitPerHour   int
 }
 
 func Load(path string) (Config, error) {
@@ -40,6 +43,7 @@ func Load(path string) (Config, error) {
 		TTSModel:            getenvDefault("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
 		TTSVoice:            getenvDefault("OPENAI_TTS_VOICE", "alloy"),
 		TTSFormat:           getenvDefault("OPENAI_TTS_FORMAT", "opus"),
+		TranscribeModel:     getenvDefault("OPENAI_TRANSCRIBE_MODEL", "gpt-transcribe"),
 		ImageModel:          getenvDefault("OPENAI_IMAGE_MODEL", "gpt-image-2.5-flare"),
 		ImageSize:           getenvDefault("OPENAI_IMAGE_SIZE", "auto"),
 		ImageQuality:        getenvDefault("OPENAI_IMAGE_QUALITY", "auto"),
@@ -49,6 +53,8 @@ func Load(path string) (Config, error) {
 		MaxCompletionTokens: getenvIntDefault("MAX_TOKENS", 4096),
 		ContextLimit:        getenvIntDefault("CONTEXT_MESSAGE_LIMIT", 20),
 		ContextTTL:          time.Duration(getenvIntDefault("CONTEXT_TTL_MINUTES", 120)) * time.Minute,
+		GroupMentionOnly:    getenvBoolDefault("GROUP_MENTION_ONLY", true),
+		ImageLimitPerHour:   getenvIntDefault("IMAGE_LIMIT_PER_HOUR", 20),
 	}
 
 	cfg.OpenAIKey = os.Getenv("OPENAI_API_KEY")
@@ -60,6 +66,9 @@ func Load(path string) (Config, error) {
 	cfg.AdminUserIDs = parseIDs(os.Getenv("ADMIN_USER_IDS"))
 	cfg.AllowedUserIDs = parseIDs(os.Getenv("ALLOWED_TELEGRAM_USER_IDS"))
 	cfg.AllowedChatIDs = parseIDs(os.Getenv("ALLOWED_TELEGRAM_CHAT_IDS"))
+	if len(cfg.AllowedUserIDs) == 0 && len(cfg.AllowedChatIDs) == 0 {
+		log.Printf("warning: ALLOWED_TELEGRAM_USER_IDS and ALLOWED_TELEGRAM_CHAT_IDS are empty, the bot is open to everyone")
+	}
 
 	return cfg, nil
 }
@@ -106,6 +115,19 @@ func getenvIntDefault(key string, def int) int {
 		return def
 	}
 	return n
+}
+
+func getenvBoolDefault(key string, def bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		log.Printf("invalid bool for %s=%q, using default %v", key, v, def)
+		return def
+	}
+	return b
 }
 
 func loadDotEnv(path string) error {

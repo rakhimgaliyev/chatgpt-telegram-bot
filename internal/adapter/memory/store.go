@@ -7,6 +7,10 @@ import (
 	"chatgpt-telegram-bot/internal/domain"
 )
 
+// maxImageMessages bounds how many messages per chat keep their image
+// data; older ones keep only the text so memory and token usage stay small.
+const maxImageMessages = 3
+
 type Store struct {
 	mu            sync.Mutex
 	conversations map[int64][]domain.Message
@@ -21,7 +25,19 @@ func NewStore() *Store {
 func (s *Store) Add(chatID int64, msg domain.Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.conversations[chatID] = append(s.conversations[chatID], msg)
+	history := append(s.conversations[chatID], msg)
+
+	withImages := 0
+	for i := len(history) - 1; i >= 0; i-- {
+		if len(history[i].Images) == 0 {
+			continue
+		}
+		withImages++
+		if withImages > maxImageMessages {
+			history[i].Images = nil
+		}
+	}
+	s.conversations[chatID] = history
 }
 
 func (s *Store) Reset(chatID int64) {
