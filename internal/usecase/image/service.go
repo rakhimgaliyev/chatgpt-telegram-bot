@@ -17,10 +17,18 @@ type Client interface {
 type Request struct {
 	Model      string
 	Prompt     string
+	Images     []InputImage
 	Size       string
 	Quality    string
 	Format     string
 	Background string
+}
+
+// InputImage is a source image to edit or combine; when a request has any,
+// the prompt describes the change instead of generating from scratch.
+type InputImage struct {
+	Data     []byte
+	MimeType string
 }
 
 type Response struct {
@@ -40,7 +48,7 @@ func NewService(client Client, cfg config.Config) *Service {
 	}
 }
 
-func (s *Service) Generate(ctx context.Context, prompt string) (Response, error) {
+func (s *Service) Generate(ctx context.Context, prompt string, images ...InputImage) (Response, error) {
 	if strings.TrimSpace(prompt) == "" {
 		return Response{}, ErrEmptyPrompt
 	}
@@ -48,6 +56,7 @@ func (s *Service) Generate(ctx context.Context, prompt string) (Response, error)
 	return s.client.Generate(ctx, Request{
 		Model:      s.cfg.ImageModel,
 		Prompt:     prompt,
+		Images:     images,
 		Size:       s.cfg.ImageSize,
 		Quality:    s.cfg.ImageQuality,
 		Format:     s.cfg.ImageFormat,

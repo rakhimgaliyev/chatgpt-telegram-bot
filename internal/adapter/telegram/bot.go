@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -17,7 +18,7 @@ import (
 
 // commands is the single source of truth for the Telegram command menu.
 var commands = []tgbotapi.BotCommand{
-	{Command: "img", Description: "Generate an image (e.g. /img cat in space)"},
+	{Command: "img", Description: "Generate an image, or edit a photo you attach or reply to"},
 	{Command: "tts", Description: "Text to speech (e.g. /tts hello)"},
 	{Command: "file", Description: "Get the answer as a file (e.g. /file write a report)"},
 	{Command: "reset", Description: "Forget the conversation history"},
@@ -26,7 +27,7 @@ var commands = []tgbotapi.BotCommand{
 
 const helpText = `Just write a message (images are supported) and I will answer.
 
-/img <prompt> - generate an image
+/img <prompt> - generate an image; attach a photo or reply to one to edit it
 /tts <text> - text to speech
 /file <prompt> - get the answer as a file
 /reset - forget the conversation history
@@ -141,19 +142,30 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	ok, text := extractCommandText(msg.Text, "img")
+	// a photo sent with "/img ..." carries the command in its caption
+	commandText := msg.Text
+	if commandText == "" {
+		commandText = msg.Caption
+	}
+	ok, text := extractCommandText(commandText, "img")
 	if !ok {
 		// /image is kept as an alias from the old command menu
-		ok, text = extractCommandText(msg.Text, "image")
+		ok, text = extractCommandText(commandText, "image")
 	}
 	if ok {
 		if strings.TrimSpace(text) == "" {
-			b.sendText(msg.Chat.ID, msg.MessageID, "usage: /img <prompt>")
+			b.sendText(msg.Chat.ID, msg.MessageID, "usage: /img <prompt>\nattach a photo or reply to one to edit it")
 			return
 		}
 
 		b.sendPhotoAction(msg.Chat.ID)
-		imageResp, err := b.img.Generate(ctx, text)
+		inputs, err := b.collectInputImages(msg)
+		if err != nil {
+			log.Printf("could not load input image: %v", err)
+			b.sendText(msg.Chat.ID, msg.MessageID, "could not load the source image, only png, jpeg and webp are supported")
+			return
+		}
+		imageResp, err := b.img.Generate(ctx, text, inputs...)
 		if err != nil {
 			if errors.Is(err, imagegen.ErrEmptyPrompt) {
 				b.sendText(msg.Chat.ID, msg.MessageID, "i need a prompt to generate an image")
@@ -216,6 +228,28 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	b.sendText(msg.Chat.ID, msg.MessageID, resp)
+}
+
+// collectInputImages loads the images to edit: the one attached to the
+// command message and the one in the message it replies to.
+func (b *Bot) collectInputImages(msg *tgbotapi.Message) ([]imagegen.InputImage, error) {
+	var inputs []imagegen.InputImage
+	for _, m := range []*tgbotapi.Message{msg, msg.ReplyToMessage} {
+		fileID, mimeType, ok := imageSource(m)
+		if !ok {
+			continue
+		}
+		data, detected, err := fetchImage(b.api, fileID, mimeType)
+		if err != nil {
+			return nil, err
+		}
+		detected = strings.ToLower(strings.TrimSpace(strings.SplitN(detected, ";", 2)[0]))
+		if detected != "image/png" && detected != "image/jpeg" && detected != "image/webp" {
+			return nil, fmt.Errorf("unsupported image type %s", detected)
+		}
+		inputs = append(inputs, imagegen.InputImage{Data: data, MimeType: detected})
+	}
+	return inputs, nil
 }
 
 // registerCommands replaces the command menu shown in Telegram clients,

@@ -20,14 +20,19 @@ import (
 const requestTimeout = 5 * time.Minute
 
 type Client struct {
-	api *openaiapi.Client
+	api   *openaiapi.Client
+	http  *http.Client
+	token string
 }
 
 func NewClient(token string) *Client {
+	httpClient := &http.Client{Timeout: requestTimeout}
 	cfg := openaiapi.DefaultConfig(token)
-	cfg.HTTPClient = &http.Client{Timeout: requestTimeout}
+	cfg.HTTPClient = httpClient
 	return &Client{
-		api: openaiapi.NewClientWithConfig(cfg),
+		api:   openaiapi.NewClientWithConfig(cfg),
+		http:  httpClient,
+		token: token,
 	}
 }
 

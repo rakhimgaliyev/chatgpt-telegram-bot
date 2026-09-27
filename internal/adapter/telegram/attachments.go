@@ -148,10 +148,10 @@ func describeAnimation(bot *tgbotapi.BotAPI, animation *tgbotapi.Animation) (str
 	return part, chat.Image{}
 }
 
-func fetchDataURL(bot *tgbotapi.BotAPI, fileID, fallbackMime string) (string, error) {
+func fetchImage(bot *tgbotapi.BotAPI, fileID, fallbackMime string) ([]byte, string, error) {
 	file, err := bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	fileURL := fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", bot.Token, file.FilePath)
 
@@ -162,20 +162,20 @@ func fetchDataURL(bot *tgbotapi.BotAPI, fileID, fallbackMime string) (string, er
 		if errors.As(err, &urlErr) {
 			err = urlErr.Err
 		}
-		return "", fmt.Errorf("download %s: %w", file.FilePath, err)
+		return nil, "", fmt.Errorf("download %s: %w", file.FilePath, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download %s: status %d", file.FilePath, resp.StatusCode)
+		return nil, "", fmt.Errorf("download %s: status %d", file.FilePath, resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxImageBytes+1))
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	if len(data) > maxImageBytes {
-		return "", fmt.Errorf("download %s: file larger than %d bytes", file.FilePath, maxImageBytes)
+		return nil, "", fmt.Errorf("download %s: file larger than %d bytes", file.FilePath, maxImageBytes)
 	}
 
 	mimeType := resp.Header.Get("Content-Type")
@@ -197,12 +197,35 @@ func fetchDataURL(bot *tgbotapi.BotAPI, fileID, fallbackMime string) (string, er
 		mimeType = mime.TypeByExtension(filepath.Ext(file.FilePath))
 	}
 	if mimeType == "" {
-		return "", fmt.Errorf("non-image mime: unknown")
+		return nil, "", fmt.Errorf("non-image mime: unknown")
 	}
 	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
-		return "", fmt.Errorf("non-image mime: %s", mimeType)
+		return nil, "", fmt.Errorf("non-image mime: %s", mimeType)
 	}
 
+	return data, mimeType, nil
+}
+
+func fetchDataURL(bot *tgbotapi.BotAPI, fileID, fallbackMime string) (string, error) {
+	data, mimeType, err := fetchImage(bot, fileID, fallbackMime)
+	if err != nil {
+		return "", err
+	}
 	encoded := base64.StdEncoding.EncodeToString(data)
 	return fmt.Sprintf("data:%s;base64,%s", mimeType, encoded), nil
+}
+
+// imageSource returns the file ID and declared mime type of the image in
+// msg: the largest photo size or an image document.
+func imageSource(msg *tgbotapi.Message) (string, string, bool) {
+	if msg == nil {
+		return "", "", false
+	}
+	if len(msg.Photo) > 0 {
+		return msg.Photo[len(msg.Photo)-1].FileID, "image/jpeg", true
+	}
+	if msg.Document != nil && strings.HasPrefix(msg.Document.MimeType, "image/") {
+		return msg.Document.FileID, msg.Document.MimeType, true
+	}
+	return "", "", false
 }

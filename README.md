@@ -11,6 +11,7 @@ Go Telegram bot that proxies users to OpenAI chat completions (non-streaming). S
 - `/file <prompt>` returns the answer as `response.md`.
 - `/tts <text>` returns synthesized speech as a voice message.
 - `/img <prompt>` (alias `/image`) generates an image and returns it as a photo.
+- `/img <prompt>` as a photo caption, or as a reply to a photo, edits that image; with both it combines the two.
 - `/reset` clears the conversation history, `/help` lists commands.
 - The Telegram command menu is registered on startup, replacing menus left by older versions.
 - Handles attachments (photos, docs, audio/video/voice/sticker/animation) by describing them in the prompt; images are passed to OpenAI.
